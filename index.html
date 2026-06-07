@@ -264,6 +264,16 @@ function cumPct(player, games) {
   });
 }
 
+function cumPctByDate(player, games) {
+  const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
+  let w=0,t=0;
+  return pg.map(g=>{
+    t++;
+    if(!g._draw&&g._winner===player) w++;
+    return {x:g._d.getTime(), y:Math.round(w/t*100), d:g._d};
+  });
+}
+
 function byMonth(player, games) {
   const m={};
   games.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
@@ -744,11 +754,19 @@ function buildRunning() {
   const el = document.getElementById('pane-running');
   const main = PLAYERS.filter(p=>pStats(p,G).t>=5);
   window._runActive = new Set(main);
+  window._runMode = 'game';
   el.innerHTML = `
     <div class="sec" style="margin-top:0">Cumulative win% — every game counts</div>
     <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
       Game 1 win = 100%. Game 2 loss = 50%. Game 3 win = 66%. Each dot is one game played.
     </p>
+    <div class="ctrls">
+      <label>X-axis</label>
+      <div style="display:flex;gap:6px" id="run-mode-pills">
+        <div class="pill on" data-mode="game" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setRunMode('game',this)">By Game #</div>
+        <div class="pill" data-mode="date" onclick="setRunMode('date',this)">By Date</div>
+      </div>
+    </div>
     <div class="ctrls">
       <label>Toggle players</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px" id="run-pills">
@@ -766,11 +784,26 @@ function toggleRun(p, el) {
   renderRunning();
 }
 
+function setRunMode(mode, el) {
+  if(window._runMode===mode) return;
+  window._runMode=mode;
+  document.querySelectorAll('#run-mode-pills .pill').forEach(p=>{
+    p.classList.remove('on');
+    p.style.background=''; p.style.color=''; p.style.borderColor='';
+  });
+  el.classList.add('on');
+  el.style.background='var(--accent)';
+  el.style.color='#0d0d0f';
+  el.style.borderColor='var(--accent)';
+  renderRunning();
+}
+
 function renderRunning() {
   const players=[...window._runActive];
+  const mode = window._runMode||'game';
   const ds=players.map(p=>({
     label:p,
-    data:cumPct(p,G),
+    data: mode==='date' ? cumPctByDate(p,G) : cumPct(p,G),
     borderColor:pc(p),
     backgroundColor:'transparent',
     tension:0.25,
@@ -779,13 +812,23 @@ function renderRunning() {
     borderWidth:2.5
   }));
   dc('running');
+
+  const xScale = mode==='date'
+    ? {type:'linear',grid:{color:gridColor},
+       title:{display:true,text:'Date',color:'#6b6b7a',font:{size:10}},
+       ticks:{color:'#6b6b7a',callback:v=>new Date(v).toLocaleDateString('en-US',{month:'short',year:'2-digit'})}}
+    : {type:'linear',...axisOpts('Game #')};
+
   charts['running']=new Chart(document.getElementById('c-running'),{
     type:'line',data:{datasets:ds},
     options:{
       parsing:false,
-      plugins:{legend:{labels:{color:'#f0ede6',font:{family:'DM Mono',size:11},padding:14}}},
+      plugins:{
+        legend:{labels:{color:'#f0ede6',font:{family:'DM Mono',size:11},padding:14}},
+        tooltip: mode==='date' ? {callbacks:{title:items=>items.length?new Date(items[0].parsed.x).toLocaleDateString():''}} : {}
+      },
       scales:{
-        x:{type:'linear',...axisOpts('Game #')},
+        x:xScale,
         y:{min:0,max:100,...axisOpts('Win %'),ticks:{color:'#6b6b7a',callback:v=>v+'%'}}
       },
       responsive:true,maintainAspectRatio:false,
