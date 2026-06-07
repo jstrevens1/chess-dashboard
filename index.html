@@ -96,6 +96,21 @@ select:focus,input:focus{border-color:var(--accent)}
 .src-bar label{font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
 .irl-tag{font-size:8px;letter-spacing:.07em;color:var(--muted2);text-transform:uppercase;font-weight:400;margin-left:4px;vertical-align:middle}
 
+/* CHANGELOG */
+.cl-timeline{position:relative;margin-top:.5rem}
+.cl-timeline::before{content:'';position:absolute;left:7px;top:8px;bottom:8px;width:2px;background:var(--border2)}
+.cl-item{position:relative;padding-left:2.25rem;margin-bottom:1.1rem}
+.cl-dot{position:absolute;left:0;top:7px;width:16px;height:16px;border-radius:50%;background:var(--s2);border:2px solid var(--border2);z-index:1}
+.cl-item.latest .cl-dot{background:var(--accent);border-color:var(--accent)}
+.cl-card{background:var(--s1);border:1px solid var(--border);border-radius:10px;padding:1rem 1.25rem}
+.cl-item.latest .cl-card{border-color:var(--accent)}
+.cl-date{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.05em;color:var(--muted);margin-bottom:.4rem}
+.cl-msg{font-family:'DM Sans',sans-serif;font-weight:500;font-size:14px;color:var(--text);line-height:1.45;margin-bottom:.6rem}
+.cl-meta{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap}
+.cl-sha{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.05em;color:var(--muted);background:var(--s2);border:1px solid var(--border);border-radius:20px;padding:2px 10px}
+.cl-link{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.04em;color:var(--blue);text-decoration:none}
+.cl-link:hover{text-decoration:underline}
+
 /* TABLE */
 .tbl-wrap{overflow-x:auto;background:var(--s1);border:1px solid var(--border);border-radius:10px}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -530,13 +545,15 @@ function boot(games) {
       <button class="tab" onclick="sw('compare',this)">Compare</button>
       <button class="tab" onclick="sw('running',this)">Running Win%</button>
       <button class="tab" onclick="sw('games',this)">All Games</button>
+      <button class="tab" onclick="sw('changelog',this)">Changelog</button>
     </nav>
-    <div id="pane-overview" class="pane on"></div>
-    <div id="pane-player"   class="pane"></div>
-    <div id="pane-h2h"      class="pane"></div>
-    <div id="pane-compare"  class="pane"></div>
-    <div id="pane-running"  class="pane"></div>
-    <div id="pane-games"    class="pane"></div>
+    <div id="pane-overview"  class="pane on"></div>
+    <div id="pane-player"    class="pane"></div>
+    <div id="pane-h2h"       class="pane"></div>
+    <div id="pane-compare"   class="pane"></div>
+    <div id="pane-running"   class="pane"></div>
+    <div id="pane-games"     class="pane"></div>
+    <div id="pane-changelog" class="pane"></div>
   `;
   buildOverview();
   buildPlayer();
@@ -551,6 +568,7 @@ function sw(id, btn) {
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));
   document.getElementById('pane-'+id).classList.add('on');
   btn.classList.add('on');
+  if(id==='changelog') loadChangelog();
 }
 
 // ─── OVERVIEW ─────────────────────────────────────────────────────────────────
@@ -1301,6 +1319,64 @@ function buildPages(cur, total, varName, fn) {
     }
   }
   return html;
+}
+
+// ─── CHANGELOG ────────────────────────────────────────────────────────────────
+const CHANGELOG_URL = 'https://api.github.com/repos/jstrevens1/chess-dashboard/commits?per_page=50';
+let _changelogLoaded = false;
+
+// fetched only when the Changelog tab is first opened, not on initial page load
+function loadChangelog() {
+  if(_changelogLoaded) return;
+  _changelogLoaded = true;
+
+  const el = document.getElementById('pane-changelog');
+  el.innerHTML = `
+    <div class="hdr-title" style="font-size:2.4rem;margin-bottom:.25rem">Changelog</div>
+    <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1.75rem">A running history of every update to the dashboard</p>
+    <div class="loading" id="changelog-status" style="height:auto;padding:3rem 0">
+      <div class="spinner"></div>
+    </div>
+  `;
+
+  fetch(CHANGELOG_URL)
+    .then(res => { if(!res.ok) throw new Error('HTTP '+res.status); return res.json(); })
+    .then(commits => renderChangelog(Array.isArray(commits) ? commits : []))
+    .catch(() => {
+      document.getElementById('changelog-status').outerHTML =
+        `<p style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:1rem 0">Changelog unavailable — could not reach GitHub</p>`;
+    });
+}
+
+function renderChangelog(commits) {
+  const status = document.getElementById('changelog-status');
+  if(!commits.length){
+    status.outerHTML = `<p style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:1rem 0">No updates yet</p>`;
+    return;
+  }
+
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const items = commits.map((c,i) => {
+    const d = new Date(c.commit.author.date);
+    const dateStr = `${d.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})} · ${d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true})}`;
+    const msg = esc((c.commit.message||'').split('\n')[0]);
+    const sha = c.sha.slice(0,7);
+    return `
+      <div class="cl-item ${i===0?'latest':''}">
+        <div class="cl-dot"></div>
+        <div class="cl-card">
+          <div class="cl-date">${dateStr}</div>
+          <div class="cl-msg">${msg}</div>
+          <div class="cl-meta">
+            <span class="cl-sha">${sha}</span>
+            <a class="cl-link" href="${c.html_url}" target="_blank" rel="noopener">view on GitHub →</a>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  status.outerHTML = `<div class="cl-timeline">${items}</div>`;
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
