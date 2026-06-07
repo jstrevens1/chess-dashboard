@@ -905,9 +905,9 @@ function renderH2H() {
       <div class="stat"><div class="lbl">Point Diff<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(p1pts)}">${fmtPts(p1pts)}</div><div class="sub">${p1} perspective</div></div>
     </div>
 
-    <div class="sec">Game by Game Momentum — ${p1} perspective</div>
+    <div class="sec">Streak Momentum — ${p1} vs ${p2}</div>
     <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-      Each bar is one game in chronological order — green above the line is a ${p1} win, red below is a ${p2} win, draws render no bar.
+      Each bar is one game in the rivalry's chronological order — bar height tracks the running win streak (positive = ${p1} streak in green, negative = ${p2} streak in red). A win extends or flips the streak instantly; a draw holds it steady and renders in yellow.
     </p>
     <div class="cbox"><canvas id="c-h2h-momentum" height="90"></canvas></div>
 
@@ -921,17 +921,29 @@ function renderH2H() {
     <div id="h2h-tbl"></div>
   `;
 
-  // Momentum — one bar per game, +1 for a p1 win (green), -1 for a p2 win (red),
-  // 0 for a draw (renders no visible bar). Respects the source toggle + color filters.
+  // Streak Momentum — running win-streak value per game. A win extends the
+  // current streak (or flips it to ±1 if the other player was on a streak);
+  // a draw holds the streak steady and renders in yellow. Respects the
+  // source toggle + color filters.
+  let streakVal = 0;
   const momLabels = h2hChrono.map((g,i)=>String(i+1));
-  const momValues = h2hChrono.map(g=> g._draw?0:(g._winner===p1?1:-1));
+  const momDraw = h2hChrono.map(g=>!!g._draw);
+  const momValues = h2hChrono.map(g=>{
+    if(g._draw) return streakVal;
+    streakVal = g._winner===p1
+      ? (streakVal<0 ? 1 : streakVal+1)
+      : (streakVal>0 ? -1 : streakVal-1);
+    return streakVal;
+  });
   const momDates = h2hChrono.map(g=>g._d);
+  const momMin = Math.min(0,...momValues)-1;
+  const momMax = Math.max(0,...momValues)+1;
   dc('h2h-momentum');
   charts['h2h-momentum']=new Chart(document.getElementById('c-h2h-momentum'),{
     type:'bar',
     data:{labels:momLabels,datasets:[{
       data:momValues,
-      backgroundColor:momValues.map(v=>v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
+      backgroundColor:momValues.map((v,i)=>momDraw[i]?'#e8d44d':v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
       borderWidth:0,
       borderRadius:1,
       barPercentage:1.0,
@@ -942,12 +954,12 @@ function renderH2H() {
         legend:{display:false},
         tooltip:{callbacks:{
           title:items=>items.length?`Game ${items[0].label} — ${momDates[items[0].dataIndex].toLocaleDateString()}`:'',
-          label:c=>c.parsed.y>0?`${p1} won`:c.parsed.y<0?`${p2} won`:'Draw'
+          label:c=>momDraw[c.dataIndex]?`Draw — streak holds at ${c.parsed.y}`:`${c.parsed.y>0?p1:p2} streak: ${Math.abs(c.parsed.y)}`
         }}
       },
       scales:{
         x:{...axisOpts('Game #'),ticks:{...axisOpts().ticks,maxTicksLimit:24,autoSkip:true},grid:{display:false}},
-        y:{min:-1.5,max:1.5,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
+        y:{min:momMin,max:momMax,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
       },
       responsive:true,maintainAspectRatio:true
     }
@@ -1146,10 +1158,10 @@ function renderCompare() {
       <div class="stat"><div class="lbl">Avg Pts<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(avgPts)}">${fmtPts(avgPts)}</div></div>
     </div>
 
-    <div class="sec">Win/Loss Momentum — ${p1}</div>
+    <div class="sec">Game by Game Results — ${p1}</div>
     ${filtered.length ? `
       <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-        Running win/loss total across ${p2 ? `${p1}'s filtered games against ${p2}` : `all of ${p1}'s filtered games`} — each win adds +1, each loss subtracts 1, draws don't move the line. Green = ${p1} ahead overall, red = ${p1} behind.
+        Each bar is one game in chronological order across ${p2 ? `${p1}'s filtered games against ${p2}` : `all of ${p1}'s filtered games`} — green bars above the line are wins, red bars below are losses, and draws leave a gap.
       </p>
       <div class="cbox"><canvas id="c-cmp-momentum"></canvas></div>
     ` : `
@@ -1161,47 +1173,36 @@ function renderCompare() {
   `;
 
   if(filtered.length){
-    // running +1/-1/0 total from p1's perspective. Each step moves by exactly ±1
-    // (or 0 for a draw), so the line can never skip over zero — every sign change
-    // passes through an actual y=0 data point, which is where segment coloring
-    // (below) naturally transitions from green to red.
-    let cum = 0;
-    const series = filtered.map((g,i) => {
-      if(!g._draw) cum += (g._winner===p1 ? 1 : -1);
-      return {x:i+1, y:cum, d:g._d};
-    });
+    // one independent bar per game from p1's perspective: +1 win (green),
+    // -1 loss (red), draws render no bar (null leaves a gap). No cumulative total.
+    const resLabels = filtered.map((g,i)=>String(i+1));
+    const resValues = filtered.map(g=> g._draw ? null : (g._winner===p1 ? 1 : -1));
+    const resDates = filtered.map(g=>g._d);
 
     dc('cmp-momentum');
     charts['cmp-momentum']=new Chart(document.getElementById('c-cmp-momentum'),{
-      type:'line',
-      data:{datasets:[{
-        label:`Win/Loss Momentum — ${p1}`,
-        data:series,
-        segment:{borderColor:ctx=>{
-          const avg=(ctx.p0.parsed.y+ctx.p1.parsed.y)/2;
-          return avg>0?'#4de8a8':avg<0?'#e84d6f':'#6b6b7a';
-        }},
-        backgroundColor:'transparent',
-        tension:0,
-        pointRadius:0,
-        pointHoverRadius:4,
-        borderWidth:2.5
+      type:'bar',
+      data:{labels:resLabels,datasets:[{
+        data:resValues,
+        backgroundColor:resValues.map(v=>v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
+        borderWidth:0,
+        borderRadius:1,
+        barPercentage:1.0,
+        categoryPercentage:1.0
       }]},
       options:{
-        parsing:false,
         plugins:{
           legend:{display:false},
           tooltip:{callbacks:{
-            title:items=>items.length?`Game ${items[0].parsed.x} — ${items[0].raw.d.toLocaleDateString()}`:'',
-            label:c=>`${c.parsed.y>0?'+':''}${c.parsed.y} (${p1} perspective)`
+            title:items=>items.length?`Game ${items[0].label} — ${resDates[items[0].dataIndex].toLocaleDateString()}`:'',
+            label:c=>c.parsed.y>0?`${p1} won`:c.parsed.y<0?`${p1} lost`:'Draw'
           }}
         },
         scales:{
-          x:{type:'linear',...axisOpts('Game #'),ticks:{...axisOpts().ticks,stepSize:1}},
-          y:{...axisOpts('Cumulative W/L'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
+          x:{...axisOpts('Game #'),ticks:{...axisOpts().ticks,maxTicksLimit:24,autoSkip:true},grid:{display:false}},
+          y:{min:-1.5,max:1.5,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
         },
-        responsive:true,maintainAspectRatio:true,
-        interaction:{mode:'index',intersect:false}
+        responsive:true,maintainAspectRatio:true
       }
     });
   } else {
