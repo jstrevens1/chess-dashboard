@@ -274,6 +274,18 @@ function parseCSVLine(line) {
   out.push(cur); return out;
 }
 
+// parses a sheet time value in M:SS / MM:SS(.s) format into seconds, or null if unparseable
+function parseTimeStr(s) {
+  if(s==null) return null;
+  s = String(s).trim();
+  if(!s) return null;
+  const m = s.match(/^(\d+):(\d+(?:\.\d+)?)$/);
+  if(!m) return null;
+  const mins = parseInt(m[1],10), secs = parseFloat(m[2]);
+  if(isNaN(mins)||isNaN(secs)) return null;
+  return mins*60+secs;
+}
+
 function parseData(text) {
   const lines = text.trim().split('\n');
   const hdr = parseCSVLine(lines[0]).map(h=>h.trim());
@@ -298,6 +310,34 @@ function parseData(text) {
     r._diff   = parseInt(r['Point Differential'])||0;
     r._timed  = notes.includes('timed') || notes.includes('time out');
     r.source  = 'IRL';
+    // timed-game time-usage analysis (data-layer prep for the Insights tab)
+    const isTimedGame = !!r['Total Time'] && (notes.includes('timed') || notes.includes('time out'));
+    r.is_timed = isTimedGame;
+    r.p1_time_used_seconds = null;
+    r.p2_time_used_seconds = null;
+    r.p1_seconds_per_move = null;
+    r.p2_seconds_per_move = null;
+    r.p1_time_efficiency_pct = null;
+    r.p2_time_efficiency_pct = null;
+    if(isTimedGame){
+      const totalTime = parseTimeStr(r['Total Time']);
+      const p1Left = parseTimeStr(r['Player 1 Time Left']);
+      const p2Left = parseTimeStr(r['Player 2 Time Left']);
+      const incRaw = (r['Added Increment']||'').trim();
+      const increment = incRaw ? parseTimeStr(incRaw) : 0;
+      const p1Moves = parseInt(r['Player 1 Moves'])||0;
+      const p2Moves = parseInt(r['Player 2 Moves'])||0;
+      if(totalTime!=null && p1Left!=null && p2Left!=null && increment!=null){
+        const p1Used = totalTime - p1Left + (p1Moves * increment);
+        const p2Used = totalTime - p2Left + (p2Moves * increment);
+        r.p1_time_used_seconds = p1Used;
+        r.p2_time_used_seconds = p2Used;
+        r.p1_seconds_per_move = p1Moves > 0 ? p1Used / p1Moves : null;
+        r.p2_seconds_per_move = p2Moves > 0 ? p2Used / p2Moves : null;
+        r.p1_time_efficiency_pct = (p1Used / totalTime) * 100;
+        r.p2_time_efficiency_pct = (p2Used / totalTime) * 100;
+      }
+    }
     games.push(r);
   }
   games.sort((a,b)=>a._d-b._d);
