@@ -307,18 +307,21 @@ function boot(games) {
       <button class="tab on" onclick="sw('overview',this)">Overview</button>
       <button class="tab" onclick="sw('player',this)">Player</button>
       <button class="tab" onclick="sw('h2h',this)">Head-to-Head</button>
+      <button class="tab" onclick="sw('compare',this)">Compare</button>
       <button class="tab" onclick="sw('running',this)">Running Win%</button>
       <button class="tab" onclick="sw('games',this)">All Games</button>
     </nav>
     <div id="pane-overview" class="pane on"></div>
     <div id="pane-player"   class="pane"></div>
     <div id="pane-h2h"      class="pane"></div>
+    <div id="pane-compare"  class="pane"></div>
     <div id="pane-running"  class="pane"></div>
     <div id="pane-games"    class="pane"></div>
   `;
   buildOverview();
   buildPlayer();
   buildH2H();
+  buildCompare();
   buildRunning();
   buildGames();
 }
@@ -560,6 +563,179 @@ function renderH2HTable(p1,p2) {
       <tbody>${rows}</tbody></table>
     </div>
     <div class="pages"><span>${h2hGames.length} games</span>${pgs}</div>
+  `;
+}
+
+// ─── COMPARE ──────────────────────────────────────────────────────────────────
+function buildCompare() {
+  const el = document.getElementById('pane-compare');
+  const p1def = PLAYERS.includes('John')?'John':PLAYERS[0];
+  const p2def = PLAYERS.includes('Josh')?'Josh':(PLAYERS[1]||'');
+
+  const noteSet = new Set();
+  G.forEach(g=>{
+    const n=(g['Notes']||'').trim();
+    noteSet.add(n===''?'No note':n);
+  });
+  const notes=[...noteSet].sort((a,b)=> a==='No note'?-1 : b==='No note'?1 : a.localeCompare(b));
+
+  const minDate = G[0]._d.toISOString().slice(0,10);
+  const maxDate = G[G.length-1]._d.toISOString().slice(0,10);
+  window._cmpMin = minDate;
+  window._cmpMax = maxDate;
+
+  el.innerHTML = `
+    <div class="ctrls">
+      <label>Player 1</label>
+      <select id="cmp-p1" onchange="renderCompare()">
+        ${PLAYERS.map(p=>`<option ${p===p1def?'selected':''}>${p}</option>`).join('')}
+      </select>
+      <label>Player 2</label>
+      <select id="cmp-p2" onchange="renderCompare()">
+        <option value="">All opponents</option>
+        ${PLAYERS.map(p=>`<option ${p===p2def?'selected':''}>${p}</option>`).join('')}
+      </select>
+    </div>
+    <div class="ctrls">
+      <label>From</label>
+      <input type="date" id="cmp-start" value="${minDate}" min="${minDate}" max="${maxDate}" onchange="renderCompare()">
+      <label>To</label>
+      <input type="date" id="cmp-end" value="${maxDate}" min="${minDate}" max="${maxDate}" onchange="renderCompare()">
+      <div class="pill" onclick="cmpQuickRange('all')">All time</div>
+      <div class="pill" onclick="cmpQuickRange('year')">This year</div>
+      <div class="pill" onclick="cmpQuickRange('6mo')">Last 6 months</div>
+      <div class="pill" onclick="cmpQuickRange('3mo')">Last 3 months</div>
+    </div>
+    <div class="ctrls">
+      <label>Note</label>
+      <select id="cmp-note" onchange="renderCompare()">
+        <option value="">All</option>
+        ${notes.map(n=>`<option>${n}</option>`).join('')}
+      </select>
+      <div class="pill" onclick="clearCompare()" style="margin-left:auto;color:var(--accent);border-color:var(--accent)">Clear filters</div>
+    </div>
+    <div id="compare-body"></div>
+  `;
+  renderCompare();
+}
+
+function cmpQuickRange(type) {
+  const max = new Date(window._cmpMax);
+  let start;
+  if(type==='all') start = new Date(window._cmpMin);
+  else if(type==='year') start = new Date(max.getFullYear(),0,1);
+  else if(type==='6mo'){ start=new Date(max); start.setMonth(start.getMonth()-6); }
+  else if(type==='3mo'){ start=new Date(max); start.setMonth(start.getMonth()-3); }
+  let startStr = start.toISOString().slice(0,10);
+  if(startStr < window._cmpMin) startStr = window._cmpMin;
+  document.getElementById('cmp-start').value = startStr;
+  document.getElementById('cmp-end').value = window._cmpMax;
+  renderCompare();
+}
+
+function clearCompare() {
+  const p1def = PLAYERS.includes('John')?'John':PLAYERS[0];
+  document.getElementById('cmp-p1').value = p1def;
+  document.getElementById('cmp-p2').value = '';
+  document.getElementById('cmp-start').value = window._cmpMin;
+  document.getElementById('cmp-end').value = window._cmpMax;
+  document.getElementById('cmp-note').value = '';
+  renderCompare();
+}
+
+let cmpPage=1; const cmpPer=20; let cmpGames=[];
+function renderCompare() {
+  const p1 = document.getElementById('cmp-p1').value;
+  const p2 = document.getElementById('cmp-p2').value;
+  const startStr = document.getElementById('cmp-start').value;
+  const endStr = document.getElementById('cmp-end').value;
+  const note = document.getElementById('cmp-note').value;
+  const start = startStr ? new Date(startStr) : null;
+  const end = endStr ? new Date(endStr) : null;
+  if(end) end.setHours(23,59,59,999);
+
+  const filtered = G.filter(g=>{
+    if(g['Player 1']!==p1 && g['Player 2']!==p1) return false;
+    if(p2 && g['Player 1']!==p2 && g['Player 2']!==p2) return false;
+    if(start && g._d < start) return false;
+    if(end && g._d > end) return false;
+    if(note){
+      const n=(g['Notes']||'').trim();
+      if((n===''?'No note':n)!==note) return false;
+    }
+    return true;
+  });
+
+  let w=0,l=0,d=0;
+  filtered.forEach(g=>{
+    if(g._draw) d++;
+    else if(g._winner===p1) w++;
+    else l++;
+  });
+  const t=w+l+d, pct=t?Math.round(w/t*100):0;
+  const col=pc(p1);
+
+  cmpPage=1;
+  cmpGames = filtered.slice().reverse();
+
+  document.getElementById('compare-body').innerHTML = `
+    <div class="stat-grid" style="max-width:600px">
+      <div class="stat"><div class="lbl">${p1} Win %</div><div class="val" style="color:${col}">${pct}%</div></div>
+      <div class="stat"><div class="lbl">Wins</div><div class="val" style="color:var(--green)">${w}</div></div>
+      <div class="stat"><div class="lbl">Losses</div><div class="val" style="color:var(--red)">${l}</div></div>
+      <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${d}</div></div>
+      <div class="stat"><div class="lbl">Games</div><div class="val">${t}</div></div>
+    </div>
+
+    <div class="sec">Win % by month</div>
+    <div class="cbox"><canvas id="c-cmp-monthly"></canvas></div>
+
+    <div class="sec">Game log</div>
+    <div id="cmp-tbl"></div>
+  `;
+
+  const bm={};
+  filtered.forEach(g=>{
+    if(!bm[g._moFull]) bm[g._moFull]={w:0,t:0};
+    bm[g._moFull].t++;
+    if(!g._draw&&g._winner===p1) bm[g._moFull].w++;
+  });
+  const mls=Object.keys(bm);
+  const mpcts=mls.map(m=>bm[m].t?Math.round(bm[m].w/bm[m].t*100):0);
+  dc('cmp-monthly');
+  charts['cmp-monthly']=new Chart(document.getElementById('c-cmp-monthly'),{
+    type:'bar',
+    data:{labels:mls,datasets:[{label:'Win %',data:mpcts,backgroundColor:mpcts.map(v=>col+(v>=50?'cc':'44')),borderColor:col,borderWidth:1,borderRadius:3}]},
+    options:{
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.y}% (${bm[mls[c.dataIndex]].w}W / ${bm[mls[c.dataIndex]].t} games)`}}},
+      scales:{x:axisOpts(),y:{...axisOpts(),min:0,max:100,ticks:{color:'#6b6b7a',callback:v=>v+'%'}}},
+      responsive:true,maintainAspectRatio:true
+    }
+  });
+
+  renderCompareTable(p1);
+}
+
+function renderCompareTable(p1) {
+  const slice=cmpGames.slice((cmpPage-1)*cmpPer, cmpPage*cmpPer);
+  const total=Math.ceil(cmpGames.length/cmpPer);
+  const rows=slice.map(g=>`<tr>
+    <td style="color:var(--muted)">${g['Game ID']}</td>
+    <td>${g._d.toLocaleDateString()}</td>
+    <td style="color:${pc(g['Player 1'])}">${g['Player 1']}</td>
+    <td style="color:${pc(g['Player 2'])}">${g['Player 2']}</td>
+    <td><span class="bdg ${g._draw?'bdg-d':'bdg-w'}" style="${g._draw?'':'background:'+pc(g._winner||'')+'18;color:'+pc(g._winner||'')}">${g._draw?'Draw':g._winner}</span></td>
+    <td style="text-align:right;color:${Math.abs(g._diff)>10?'var(--red)':'var(--muted)'}">${g._diff||'—'}</td>
+    <td style="color:var(--muted);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${g['Notes']||''}</td>
+  </tr>`).join('');
+
+  const pgs=buildPages(cmpPage,total,'cmpPage','renderCompareTable(\''+p1+'\')');
+  document.getElementById('cmp-tbl').innerHTML=`
+    <div class="tbl-wrap">
+      <table><thead><tr><th>#</th><th>Date</th><th>Player 1</th><th>Player 2</th><th>Winner</th><th>Margin</th><th>Notes</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    </div>
+    <div class="pages"><span>${cmpGames.length} games</span>${pgs}</div>
   `;
 }
 
