@@ -253,6 +253,11 @@ const sourceFiltered = games => window._sourceMode==='irl' ? games.filter(g=>g.s
                               : window._sourceMode==='online' ? games.filter(g=>g.source==='Online')
                               : games;
 
+// which color a given player played in a game ('White'/'Black')
+const playingAs = (g, player) => g['Player 1']===player ? g['Color 1'] : g['Color 2'];
+// 'both' | 'White' | 'Black' — used by the Player and Head-to-Head color filters
+const colorFiltered = (games, player, mode) => mode==='both' ? games : games.filter(g=>playingAs(g,player)===mode);
+
 const dc = id => { if(charts[id]){charts[id].destroy(); delete charts[id];} };
 
 function parseCSVLine(line) {
@@ -379,9 +384,11 @@ async function fetchChessCom(startDate) {
 }
 
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
-function pStats(player, games) {
-  // `games` drives the W/L/D record (respects the source toggle); points are
-  // an IRL-only concept and always come from GIRL regardless of what's passed.
+function pStats(player, games, ptsPool=GIRL) {
+  // `games` drives the W/L/D record (respects the source toggle and any color
+  // filter); points are an IRL-only concept and come from `ptsPool`, which
+  // defaults to GIRL (full IRL set) but callers may pass a narrower IRL subset
+  // (e.g. color-filtered) — points always stay within IRL games regardless.
   const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
   let w=0,l=0,d=0;
   pg.forEach(g=>{
@@ -390,13 +397,13 @@ function pStats(player, games) {
     else l++;
   });
   const t=w+l+d;
-  const ipg = GIRL.filter(g=>g['Player 1']===player||g['Player 2']===player);
+  const ipg = ptsPool.filter(g=>g['Player 1']===player||g['Player 2']===player);
   let pts=0;
   ipg.forEach(g=>{ pts += gamePoints(g, player); });
   return {w,l,d,t,pct:t?Math.round(w/t*100):0,pts,avgPts:ipg.length?+(pts/ipg.length).toFixed(1):0,pg};
 }
 
-function h2h(player, games) {
+function h2h(player, games, ptsPool=GIRL) {
   const opp={};
   games.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
     const o = g['Player 1']===player?g['Player 2']:g['Player 1'];
@@ -405,8 +412,8 @@ function h2h(player, games) {
     else if(g._winner===player) opp[o].w++;
     else opp[o].l++;
   });
-  // points tally is IRL-only — always pulled from GIRL, ignoring the source toggle
-  GIRL.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
+  // points tally is IRL-only — pulled from `ptsPool` (defaults to GIRL), ignoring the source toggle
+  ptsPool.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
     const o = g['Player 1']===player?g['Player 2']:g['Player 1'];
     if(!opp[o]) opp[o]={w:0,l:0,d:0,pts:0};
     opp[o].pts += gamePoints(g, player);
@@ -685,6 +692,22 @@ function buildOverview() {
 }
 
 // ─── PLAYER ───────────────────────────────────────────────────────────────────
+window._playerColorMode = 'both'; // 'both' | 'White' | 'Black' — "Playing as" filter on the Player tab
+
+function setPlayerColorMode(mode, el) {
+  if(window._playerColorMode===mode) return;
+  window._playerColorMode = mode;
+  el.parentElement.querySelectorAll('.pill').forEach(p=>{
+    p.classList.remove('on');
+    p.style.background=''; p.style.color=''; p.style.borderColor='';
+  });
+  el.classList.add('on');
+  el.style.background='var(--accent)';
+  el.style.color='#0d0d0f';
+  el.style.borderColor='var(--accent)';
+  renderPlayer(document.getElementById('sel-player').value);
+}
+
 function buildPlayer() {
   const el = document.getElementById('pane-player');
   const def = PLAYERS.includes('John')?'John':PLAYERS[0];
@@ -694,6 +717,10 @@ function buildPlayer() {
       <select id="sel-player" onchange="renderPlayer(this.value)">
         ${PLAYERS.map(p=>`<option ${p===def?'selected':''}>${p}</option>`).join('')}
       </select>
+      <label>Playing as</label>
+      <div class="pill on" data-color="both" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setPlayerColorMode('both',this)">Both</div>
+      <div class="pill" data-color="White" onclick="setPlayerColorMode('White',this)">White</div>
+      <div class="pill" data-color="Black" onclick="setPlayerColorMode('Black',this)">Black</div>
     </div>
     <div id="player-body"></div>
   `;
@@ -701,9 +728,11 @@ function buildPlayer() {
 }
 
 function renderPlayer(p) {
-  const SF = sourceFiltered(G);
-  const s = pStats(p, SF);     // record/win% respect the toggle; s.pts/s.avgPts are always IRL-only
-  const opp = h2h(p, SF);      // w/l/d respect the toggle; opp[x].pts is always IRL-only
+  const colorMode = window._playerColorMode;
+  const SF = colorFiltered(sourceFiltered(G), p, colorMode);   // record/charts respect source toggle + "Playing as" filter
+  const ptsPool = colorFiltered(GIRL, p, colorMode);            // points stay IRL-only, narrowed by the same color filter
+  const s = pStats(p, SF, ptsPool);   // record/win% respect both filters; s.pts/s.avgPts are IRL-only within them
+  const opp = h2h(p, SF, ptsPool);    // w/l/d respect both filters; opp[x].pts is IRL-only within them
   const sr = streak(p, SF);
   const col = pc(p);
   const strLabel = sr.type==='w'?'Win':sr.type==='l'?'Loss':'Draw';
@@ -767,10 +796,11 @@ function renderPlayer(p) {
     }
   });
 
-  // net points by month chart — IRL only, always, regardless of the source toggle.
+  // net points by month chart — IRL only, always, regardless of the source toggle,
+  // narrowed by the same "Playing as" color filter as the rest of the Player tab.
   // Chess.com games never appear here in any form (gamePoints already returns 0
-  // for them, and pointsByMonth only ever sees IRL games via GIRL).
-  const pbm = pointsByMonth(p, GIRL);
+  // for them, and pointsByMonth only ever sees IRL games via ptsPool/GIRL).
+  const pbm = pointsByMonth(p, ptsPool);
   const pmls = Object.keys(pbm);
   const pmpts = pmls.map(m=>pbm[m]);
   dc('p-pts-monthly');
@@ -792,10 +822,31 @@ function renderPlayer(p) {
 }
 
 // ─── HEAD-TO-HEAD ─────────────────────────────────────────────────────────────
+window._h2hColorMode = {p1:'both', p2:'both'}; // 'both' | 'White' | 'Black' — per-player color filters
+
+function setH2HColorMode(which, mode, el) {
+  const key = 'p'+which;
+  if(window._h2hColorMode[key]===mode) return;
+  window._h2hColorMode[key] = mode;
+  el.parentElement.querySelectorAll('.pill').forEach(p=>{
+    p.classList.remove('on');
+    p.style.background=''; p.style.color=''; p.style.borderColor='';
+  });
+  el.classList.add('on');
+  el.style.background='var(--accent)';
+  el.style.color='#0d0d0f';
+  el.style.borderColor='var(--accent)';
+  renderH2H();
+}
+
 function buildH2H() {
   const el = document.getElementById('pane-h2h');
   const p1 = PLAYERS.includes('John')?'John':PLAYERS[0];
   const p2 = PLAYERS.includes('Josh')?'Josh':PLAYERS[1];
+  const colorPills = which => `
+      <div class="pill on" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setH2HColorMode(${which},'both',this)">Both</div>
+      <div class="pill" onclick="setH2HColorMode(${which},'White',this)">White</div>
+      <div class="pill" onclick="setH2HColorMode(${which},'Black',this)">Black</div>`;
   el.innerHTML = `
     <div class="ctrls">
       <label>Player 1</label>
@@ -806,6 +857,14 @@ function buildH2H() {
       <select id="h2h-p2" onchange="renderH2H()">
         ${PLAYERS.map(p=>`<option ${p===p2?'selected':''}>${p}</option>`).join('')}
       </select>
+    </div>
+    <div class="ctrls">
+      <label>Player 1 playing as</label>
+      ${colorPills(1)}
+    </div>
+    <div class="ctrls">
+      <label>Player 2 playing as</label>
+      ${colorPills(2)}
     </div>
     <div id="h2h-body"></div>
   `;
@@ -819,9 +878,11 @@ function renderH2H() {
   const el=document.getElementById('h2h-body');
   if(p1===p2){el.innerHTML='<p style="color:var(--muted);font-family:DM Mono,monospace;font-size:12px;padding:1rem">Pick two different players.</p>';return;}
 
+  const cm = window._h2hColorMode;
   const matchup = g => (g['Player 1']===p1&&g['Player 2']===p2)||(g['Player 1']===p2&&g['Player 2']===p1);
-  h2hChrono = sourceFiltered(G).filter(matchup);          // record + log respect the source toggle
-  const h2hChronoIRL = GIRL.filter(matchup);               // points are always IRL-only, ignoring the toggle
+  const colorMatch = g => (cm.p1==='both'||playingAs(g,p1)===cm.p1) && (cm.p2==='both'||playingAs(g,p2)===cm.p2);
+  h2hChrono = sourceFiltered(G).filter(matchup).filter(colorMatch);   // record + log respect the source toggle + color filters
+  const h2hChronoIRL = GIRL.filter(matchup).filter(colorMatch);        // points are always IRL-only, ignoring the source toggle (but still color-filtered)
   h2hGames = h2hChrono.slice().reverse();
   let p1w=0,p2w=0,dr=0,p1pts=0;
   h2hChrono.forEach(g=>{
@@ -844,6 +905,12 @@ function renderH2H() {
       <div class="stat"><div class="lbl">Point Diff<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(p1pts)}">${fmtPts(p1pts)}</div><div class="sub">${p1} perspective</div></div>
     </div>
 
+    <div class="sec">Game by Game Momentum — ${p1} perspective</div>
+    <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
+      Each bar is one game in chronological order — green above the line is a ${p1} win, red below is a ${p2} win, draws render no bar.
+    </p>
+    <div class="cbox"><canvas id="c-h2h-momentum" height="90"></canvas></div>
+
     <div class="sec">Cumulative point differential <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
     <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
       Running total of points ${p1} has gained over ${p2} across their shared in-person game history (Chess.com games are not part of the points system and never appear here). Above zero = ${p1} ahead, below zero = ${p2} ahead.
@@ -853,6 +920,38 @@ function renderH2H() {
     <div class="sec">${p1} vs ${p2} — game log</div>
     <div id="h2h-tbl"></div>
   `;
+
+  // Momentum — one bar per game, +1 for a p1 win (green), -1 for a p2 win (red),
+  // 0 for a draw (renders no visible bar). Respects the source toggle + color filters.
+  const momLabels = h2hChrono.map((g,i)=>String(i+1));
+  const momValues = h2hChrono.map(g=> g._draw?0:(g._winner===p1?1:-1));
+  const momDates = h2hChrono.map(g=>g._d);
+  dc('h2h-momentum');
+  charts['h2h-momentum']=new Chart(document.getElementById('c-h2h-momentum'),{
+    type:'bar',
+    data:{labels:momLabels,datasets:[{
+      data:momValues,
+      backgroundColor:momValues.map(v=>v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
+      borderWidth:0,
+      borderRadius:1,
+      barPercentage:1.0,
+      categoryPercentage:1.0
+    }]},
+    options:{
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{
+          title:items=>items.length?`Game ${items[0].label} — ${momDates[items[0].dataIndex].toLocaleDateString()}`:'',
+          label:c=>c.parsed.y>0?`${p1} won`:c.parsed.y<0?`${p2} won`:'Draw'
+        }}
+      },
+      scales:{
+        x:{...axisOpts('Game #'),ticks:{...axisOpts().ticks,maxTicksLimit:24,autoSkip:true},grid:{display:false}},
+        y:{min:-1.5,max:1.5,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
+      },
+      responsive:true,maintainAspectRatio:true
+    }
+  });
 
   dc('h2h-pts');
   charts['h2h-pts']=new Chart(document.getElementById('c-h2h-pts'),{
@@ -1047,31 +1146,67 @@ function renderCompare() {
       <div class="stat"><div class="lbl">Avg Pts<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(avgPts)}">${fmtPts(avgPts)}</div></div>
     </div>
 
-    <div class="sec">Win % by month</div>
-    <div class="cbox"><canvas id="c-cmp-monthly"></canvas></div>
+    <div class="sec">Win/Loss Momentum — ${p1}</div>
+    ${filtered.length ? `
+      <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
+        Running win/loss total across ${p2 ? `${p1}'s filtered games against ${p2}` : `all of ${p1}'s filtered games`} — each win adds +1, each loss subtracts 1, draws don't move the line. Green = ${p1} ahead overall, red = ${p1} behind.
+      </p>
+      <div class="cbox"><canvas id="c-cmp-momentum"></canvas></div>
+    ` : `
+      <p style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:1rem 0">No games match the current filters</p>
+    `}
 
     <div class="sec">Game log</div>
     <div id="cmp-tbl"></div>
   `;
 
-  const bm={};
-  filtered.forEach(g=>{
-    if(!bm[g._moFull]) bm[g._moFull]={w:0,t:0};
-    bm[g._moFull].t++;
-    if(!g._draw&&g._winner===p1) bm[g._moFull].w++;
-  });
-  const mls=Object.keys(bm);
-  const mpcts=mls.map(m=>bm[m].t?Math.round(bm[m].w/bm[m].t*100):0);
-  dc('cmp-monthly');
-  charts['cmp-monthly']=new Chart(document.getElementById('c-cmp-monthly'),{
-    type:'bar',
-    data:{labels:mls,datasets:[{label:'Win %',data:mpcts,backgroundColor:mpcts.map(v=>col+(v>=50?'cc':'44')),borderColor:col,borderWidth:1,borderRadius:3}]},
-    options:{
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.y}% (${bm[mls[c.dataIndex]].w}W / ${bm[mls[c.dataIndex]].t} games)`}}},
-      scales:{x:axisOpts(),y:{...axisOpts(),min:0,max:100,ticks:{color:'#6b6b7a',callback:v=>v+'%'}}},
-      responsive:true,maintainAspectRatio:true
-    }
-  });
+  if(filtered.length){
+    // running +1/-1/0 total from p1's perspective. Each step moves by exactly ±1
+    // (or 0 for a draw), so the line can never skip over zero — every sign change
+    // passes through an actual y=0 data point, which is where segment coloring
+    // (below) naturally transitions from green to red.
+    let cum = 0;
+    const series = filtered.map((g,i) => {
+      if(!g._draw) cum += (g._winner===p1 ? 1 : -1);
+      return {x:i+1, y:cum, d:g._d};
+    });
+
+    dc('cmp-momentum');
+    charts['cmp-momentum']=new Chart(document.getElementById('c-cmp-momentum'),{
+      type:'line',
+      data:{datasets:[{
+        label:`Win/Loss Momentum — ${p1}`,
+        data:series,
+        segment:{borderColor:ctx=>{
+          const avg=(ctx.p0.parsed.y+ctx.p1.parsed.y)/2;
+          return avg>0?'#4de8a8':avg<0?'#e84d6f':'#6b6b7a';
+        }},
+        backgroundColor:'transparent',
+        tension:0,
+        pointRadius:0,
+        pointHoverRadius:4,
+        borderWidth:2.5
+      }]},
+      options:{
+        parsing:false,
+        plugins:{
+          legend:{display:false},
+          tooltip:{callbacks:{
+            title:items=>items.length?`Game ${items[0].parsed.x} — ${items[0].raw.d.toLocaleDateString()}`:'',
+            label:c=>`${c.parsed.y>0?'+':''}${c.parsed.y} (${p1} perspective)`
+          }}
+        },
+        scales:{
+          x:{type:'linear',...axisOpts('Game #'),ticks:{...axisOpts().ticks,stepSize:1}},
+          y:{...axisOpts('Cumulative W/L'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
+        },
+        responsive:true,maintainAspectRatio:true,
+        interaction:{mode:'index',intersect:false}
+      }
+    });
+  } else {
+    dc('cmp-momentum');
+  }
 
   renderCompareTable(p1);
 }
