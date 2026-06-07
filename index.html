@@ -115,9 +115,43 @@ tr:hover td{background:var(--s2)}
   .lb-hdr>*:nth-child(4),.lb-row>*:nth-child(4),
   .lb-hdr>*:nth-child(5),.lb-row>*:nth-child(5){display:none}
 }
+
+/* PASSWORD GATE */
+.gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:1000;padding:1.5rem}
+.gate-card{width:100%;max-width:340px;text-align:center}
+.gate-title{font-family:'Bebas Neue',sans-serif;font-size:clamp(2.4rem,8vw,3.4rem);letter-spacing:.04em;color:var(--accent);line-height:1;margin-bottom:.3rem}
+.gate-title span{color:var(--text)}
+.gate-sub{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1.75rem;letter-spacing:.04em}
+.gate-form{display:flex;flex-direction:column;gap:.7rem}
+.gate-input{background:var(--s2);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:14px;padding:.85rem 1rem;border-radius:8px;outline:none;text-align:center;letter-spacing:.08em;width:100%}
+.gate-input:focus{border-color:var(--accent)}
+.gate-input.shake{animation:gate-shake .4s}
+.gate-btn{background:var(--accent);border:none;color:var(--bg);font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:500;padding:.85rem 1rem;border-radius:8px;cursor:pointer;transition:filter .15s}
+.gate-btn:hover{filter:brightness(1.08)}
+.gate-err{font-family:'DM Mono',monospace;font-size:11px;color:var(--red);min-height:1.4em;margin-top:.5rem;opacity:0;transition:opacity .15s}
+.gate-err.show{opacity:1}
+@keyframes gate-shake{
+  0%,100%{transform:translateX(0)}
+  20%{transform:translateX(-9px)}
+  40%{transform:translateX(8px)}
+  60%{transform:translateX(-6px)}
+  80%{transform:translateX(4px)}
+}
 </style>
 </head>
 <body>
+
+<div class="gate" id="gate">
+  <div class="gate-card">
+    <div class="gate-title">Chess <span>Night</span></div>
+    <div class="gate-sub">Enter the password to view the dashboard</div>
+    <form class="gate-form" id="gate-form" autocomplete="off">
+      <input class="gate-input" id="gate-input" type="password" placeholder="Password" autofocus>
+      <button class="gate-btn" type="submit">Enter</button>
+      <div class="gate-err" id="gate-err">Incorrect password. Try again.</div>
+    </form>
+  </div>
+</div>
 
 <div class="hdr">
   <div>
@@ -679,7 +713,7 @@ function buildPages(cur, total, varName, fn) {
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
-(async()=>{
+async function startApp() {
   try {
     const res = await fetch(CSV_URL);
     if(!res.ok) throw new Error('HTTP '+res.status);
@@ -696,6 +730,39 @@ function buildPages(cur, total, varName, fn) {
     </div>`;
     document.getElementById('meta').textContent='Error loading data';
   }
+}
+
+// ─── PASSWORD GATE ────────────────────────────────────────────────────────────
+const GATE_PASSWORD = 'neighneigh';
+const GATE_KEY = 'chessNightAuthed';
+
+function unlockGate() {
+  document.getElementById('gate').remove();
+  startApp();
+}
+
+(() => {
+  const gate = document.getElementById('gate');
+  if(sessionStorage.getItem(GATE_KEY)==='1'){ gate.remove(); startApp(); return; }
+
+  const form = document.getElementById('gate-form');
+  const input = document.getElementById('gate-input');
+  const err = document.getElementById('gate-err');
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    if(input.value === GATE_PASSWORD){
+      sessionStorage.setItem(GATE_KEY, '1');
+      unlockGate();
+    } else {
+      err.classList.add('show');
+      input.classList.remove('shake');
+      void input.offsetWidth; // restart animation
+      input.classList.add('shake');
+      input.value = '';
+      input.focus();
+    }
+  });
 })();
 </script>
 </body>
