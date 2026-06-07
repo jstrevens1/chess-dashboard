@@ -249,6 +249,10 @@ const charts = {};
 
 // global source toggle — filters every non-points view; points views always use GIRL (IRL only)
 window._sourceMode = 'all'; // 'irl' | 'online' | 'all'
+
+// global time-series aggregation toggle — shared by every chart with a time-based
+// or sequential x-axis across every tab ('game' | 'daily' | 'weekly' | 'monthly' | 'annually')
+window._tsMode = 'game';
 const sourceFiltered = games => window._sourceMode==='irl' ? games.filter(g=>g.source==='IRL')
                               : window._sourceMode==='online' ? games.filter(g=>g.source==='Online')
                               : games;
@@ -431,16 +435,6 @@ function cumPct(player, games) {
   });
 }
 
-function cumPctByDate(player, games) {
-  const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
-  let w=0,t=0;
-  return pg.map(g=>{
-    t++;
-    if(!g._draw&&g._winner===player) w++;
-    return {x:g._d.getTime(), y:Math.round(w/t*100), d:g._d};
-  });
-}
-
 function cumPtsByGame(player, games) {
   const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
   let cum=0;
@@ -448,34 +442,6 @@ function cumPtsByGame(player, games) {
     cum += gamePoints(g, player);
     return {x:i+1, y:cum, d:g._d};
   });
-}
-
-function cumPtsByDate(player, games) {
-  const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
-  let cum=0;
-  return pg.map(g=>{
-    cum += gamePoints(g, player);
-    return {x:g._d.getTime(), y:cum, d:g._d};
-  });
-}
-
-function byMonth(player, games) {
-  const m={};
-  games.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
-    if(!m[g._moFull]) m[g._moFull]={w:0,t:0};
-    m[g._moFull].t++;
-    if(!g._draw&&g._winner===player) m[g._moFull].w++;
-  });
-  return m;
-}
-
-function pointsByMonth(player, games) {
-  const m={};
-  games.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
-    if(!m[g._moFull]) m[g._moFull]=0;
-    m[g._moFull] += gamePoints(g, player);
-  });
-  return m;
 }
 
 function streak(player, games) {
@@ -496,6 +462,87 @@ Chart.defaults.font.family="'DM Mono', monospace";
 Chart.defaults.font.size=10;
 const gridColor='rgba(255,255,255,0.04)';
 const axisOpts=(label)=>({ticks:{color:'#6b6b7a'},grid:{color:gridColor},title:label?{display:true,text:label,color:'#6b6b7a',font:{size:10}}:{}});
+
+// ─── SHARED TIME-SERIES AGGREGATION (window._tsMode) ──────────────────────────
+// Buckets a chronologically-sorted game list into period groups for the
+// aggregated views. Each bucket carries its games plus an `x` timestamp (period
+// start) and a human `label`, returned in chronological order. Not used in 'game' mode.
+function periodBuckets(games, mode) {
+  const groups = {}; const order = [];
+  games.forEach(g=>{
+    const d = g._d;
+    let t, label;
+    if(mode==='daily'){
+      t = new Date(d.getFullYear(),d.getMonth(),d.getDate());
+      label = t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    } else if(mode==='weekly'){
+      t = new Date(d.getFullYear(),d.getMonth(),d.getDate()-d.getDay());
+      label = t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    } else if(mode==='monthly'){
+      t = new Date(d.getFullYear(),d.getMonth(),1);
+      label = t.toLocaleDateString('en-US',{month:'short',year:'numeric'});
+    } else { // annually
+      t = new Date(d.getFullYear(),0,1);
+      label = String(d.getFullYear());
+    }
+    const key = t.getTime();
+    if(!groups[key]){ groups[key]={x:key,label,games:[]}; order.push(key); }
+    groups[key].games.push(g);
+  });
+  return order.sort((a,b)=>a-b).map(k=>groups[k]);
+}
+
+// shared x-axis scale for every time-series chart, driven by window._tsMode
+function tsXScale() {
+  const mode = window._tsMode;
+  if(mode==='game') return {type:'linear',...axisOpts('Game #'),ticks:{...axisOpts().ticks,stepSize:1,maxTicksLimit:24,autoSkip:true}};
+  const fmt = {
+    daily:    v=>new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}),
+    weekly:   v=>new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}),
+    monthly:  v=>new Date(v).toLocaleDateString('en-US',{month:'short',year:'2-digit'}),
+    annually: v=>new Date(v).getFullYear()
+  }[mode];
+  const title = {daily:'Date',weekly:'Week',monthly:'Month',annually:'Year'}[mode];
+  return {type:'linear',grid:{color:gridColor},
+    title:{display:true,text:title,color:'#6b6b7a',font:{size:10}},
+    ticks:{color:'#6b6b7a',maxTicksLimit:12,callback:fmt}};
+}
+
+// formats an aggregated bucket's x-timestamp into a tooltip-friendly label
+function tsTooltipLabel(x) {
+  const mode = window._tsMode;
+  const d = new Date(x);
+  if(mode==='annually') return String(d.getFullYear());
+  if(mode==='monthly') return d.toLocaleDateString('en-US',{month:'long',year:'numeric'});
+  return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+}
+
+// shared markup for the 5-option time-series toggle (Game # / Daily / Weekly /
+// Monthly / Annually); every instance carries the `.ts-pill` class so setTSMode
+// can keep every copy of it — across every tab — in sync with one shared state
+function tsPillsHTML() {
+  const opts = [['game','Game #'],['daily','Daily'],['weekly','Weekly'],['monthly','Monthly'],['annually','Annually']];
+  return opts.map(([mode,label])=>{
+    const on = window._tsMode===mode;
+    return `<div class="pill ts-pill${on?' on':''}" data-mode="${mode}"${on?' style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)"':''} onclick="setTSMode('${mode}',this)">${label}</div>`;
+  }).join('');
+}
+
+function setTSMode(mode, el) {
+  if(window._tsMode===mode) return;
+  window._tsMode = mode;
+  document.querySelectorAll('.ts-pill').forEach(p=>{
+    p.classList.remove('on');
+    p.style.background=''; p.style.color=''; p.style.borderColor='';
+  });
+  document.querySelectorAll(`.ts-pill[data-mode="${mode}"]`).forEach(p=>{
+    p.classList.add('on');
+    p.style.background='var(--accent)';
+    p.style.color='#0d0d0f';
+    p.style.borderColor='var(--accent)';
+  });
+  refreshAll();
+}
 
 // ─── BUILD ────────────────────────────────────────────────────────────────────
 let _ccStatusHTML = '';
@@ -715,6 +762,10 @@ function buildPlayer() {
       <div class="pill" data-color="White" onclick="setPlayerColorMode('White',this)">White</div>
       <div class="pill" data-color="Black" onclick="setPlayerColorMode('Black',this)">Black</div>
     </div>
+    <div class="ctrls">
+      <label>Time series view</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${tsPillsHTML()}</div>
+    </div>
     <div id="player-body"></div>
   `;
   renderPlayer(def);
@@ -733,6 +784,11 @@ function renderPlayer(p) {
 
   const beaten = Object.entries(opp).sort((a,b)=>b[1].w-a[1].w);
   const hardest = Object.entries(opp).sort((a,b)=>b[1].l-a[1].l);
+
+  const tsMode = window._tsMode;
+  const tsTitle = {game:'Game #', daily:'Daily', weekly:'Weekly', monthly:'Monthly', annually:'Annually'}[tsMode];
+  const winSeries = playerWinSeries(p, SF, tsMode);
+  const ptsSeries = playerPointsSeries(p, ptsPool, tsMode);
 
   const cards = Object.entries(opp).map(([o,r])=>{
     const t=r.w+r.l+r.d, pct=t?Math.round(r.w/t*100):0;
@@ -764,47 +820,42 @@ function renderPlayer(p) {
       ${hardest[0]?`<div class="stat"><div class="lbl">Hardest Opp</div><div class="val" style="color:${pc(hardest[0][0])};font-size:1.2rem;padding-top:.25rem">${hardest[0][0]}</div><div class="sub">${hardest[0][1].l} losses</div></div>`:''}
     </div>
 
-    <div class="sec">Win % by month</div>
+    <div class="sec">Win % — ${tsTitle}</div>
     <div class="cbox"><canvas id="c-p-monthly"></canvas></div>
 
-    <div class="sec">Net points by month <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
+    <div class="sec">Net points — ${tsTitle} <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
     <div class="cbox"><canvas id="c-p-pts-monthly"></canvas></div>
 
     <div class="sec">Record vs each opponent</div>
     <div class="h2h-grid">${cards}</div>
   `;
 
-  // monthly win% chart — respects the source toggle
-  const bm = byMonth(p, SF);
-  const mls = Object.keys(bm);
-  const mpcts = mls.map(m=>bm[m].t?Math.round(bm[m].w/bm[m].t*100):0);
+  // win % chart — one bar per game (Game # mode) or per period (aggregated modes);
+  // always respects the source toggle + "Playing as" filter via SF
   dc('p-monthly');
   charts['p-monthly'] = new Chart(document.getElementById('c-p-monthly'),{
     type:'bar',
-    data:{labels:mls,datasets:[{label:'Win %',data:mpcts,backgroundColor:mpcts.map(v=>col+(v>=50?'cc':'44')),borderColor:col,borderWidth:1,borderRadius:3}]},
+    data:{labels:winSeries.map(s=>s.label),datasets:[{label:'Win %',data:winSeries.map(s=>s.val),backgroundColor:winSeries.map(s=>col+(s.val>=50?'cc':'44')),borderColor:col,borderWidth:1,borderRadius:3}]},
     options:{
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.parsed.y}% (${bm[mls[c.dataIndex]].w}W / ${bm[mls[c.dataIndex]].t} games)`}}},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>winSeries[c.dataIndex].tip}}},
       scales:{x:axisOpts(),y:{...axisOpts(),min:0,max:100,ticks:{color:'#6b6b7a',callback:v=>v+'%'}}},
       responsive:true,maintainAspectRatio:true
     }
   });
 
-  // net points by month chart — IRL only, always, regardless of the source toggle,
-  // narrowed by the same "Playing as" color filter as the rest of the Player tab.
-  // Chess.com games never appear here in any form (gamePoints already returns 0
-  // for them, and pointsByMonth only ever sees IRL games via ptsPool/GIRL).
-  const pbm = pointsByMonth(p, ptsPool);
-  const pmls = Object.keys(pbm);
-  const pmpts = pmls.map(m=>pbm[m]);
+  // net points chart — IRL only, always, regardless of the source toggle, narrowed
+  // by the same "Playing as" color filter as the rest of the Player tab. One bar
+  // per game (Game # mode, gamePoints already 0 for any non-IRL game) or per period
+  // (aggregated modes, summing gamePoints across each period's IRL games).
   dc('p-pts-monthly');
   charts['p-pts-monthly'] = new Chart(document.getElementById('c-p-pts-monthly'),{
     type:'bar',
-    data:{labels:pmls,datasets:[{label:'Net Points',data:pmpts,
-      backgroundColor:pmpts.map(v=>v>=0?'rgba(77,232,168,.55)':'rgba(232,77,111,.55)'),
-      borderColor:pmpts.map(v=>v>=0?'#4de8a8':'#e84d6f'),
+    data:{labels:ptsSeries.map(s=>s.label),datasets:[{label:'Net Points',data:ptsSeries.map(s=>s.val),
+      backgroundColor:ptsSeries.map(s=>s.val>=0?'rgba(77,232,168,.55)':'rgba(232,77,111,.55)'),
+      borderColor:ptsSeries.map(s=>s.val>=0?'#4de8a8':'#e84d6f'),
       borderWidth:1,borderRadius:3}]},
     options:{
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${fmtPts(c.parsed.y)} pts`}}},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>ptsSeries[c.dataIndex].tip}}},
       scales:{
         x:axisOpts(),
         y:{...axisOpts('Net Points'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
@@ -814,28 +865,43 @@ function renderPlayer(p) {
   });
 }
 
+// one bar per game (Game # mode — win=100%/draw=50%/loss=0%) or per period
+// (aggregated modes — win % computed from that period's games only)
+function playerWinSeries(player, games, mode) {
+  if(mode==='game'){
+    return games.map(g=>({
+      label: g._d.toLocaleDateString(),
+      val: g._draw?50:(g._winner===player?100:0),
+      tip: g._draw ? 'Draw' : (g._winner===player ? `${player} won` : `${player} lost`)
+    }));
+  }
+  return periodBuckets(games, mode).map(b=>{
+    let w=0,t=0;
+    b.games.forEach(g=>{ t++; if(!g._draw&&g._winner===player) w++; });
+    const val = t?Math.round(w/t*100):0;
+    return {label:b.label, val, tip:`${val}% (${w}W / ${t} games)`};
+  });
+}
+
+// one bar per game (Game # mode — that game's signed differential) or per period
+// (aggregated modes — every IRL game's differential summed across the period)
+function playerPointsSeries(player, games, mode) {
+  if(mode==='game'){
+    return games.map(g=>{ const v=gamePoints(g,player); return {label:g._d.toLocaleDateString(), val:v, tip:`${fmtPts(v)} pts`}; });
+  }
+  return periodBuckets(games, mode).map(b=>{
+    const sum = b.games.reduce((a,g)=>a+gamePoints(g,player),0);
+    return {label:b.label, val:sum, tip:`${fmtPts(sum)} pts`};
+  });
+}
+
 // ─── COMPARE BUILDER ──────────────────────────────────────────────────────────
 window._cbColorMode = {p1:'both', p2:'both'}; // 'both' | 'White' | 'Black' — per-player color filters
-window._cbXAxis = 'game'; // 'game' | 'date' — shared by every time-series chart on this tab
 
 function setCBColorMode(which, mode, el) {
   const key = 'p'+which;
   if(window._cbColorMode[key]===mode) return;
   window._cbColorMode[key] = mode;
-  el.parentElement.querySelectorAll('.pill').forEach(p=>{
-    p.classList.remove('on');
-    p.style.background=''; p.style.color=''; p.style.borderColor='';
-  });
-  el.classList.add('on');
-  el.style.background='var(--accent)';
-  el.style.color='#0d0d0f';
-  el.style.borderColor='var(--accent)';
-  renderCompareBuilder();
-}
-
-function setCBXAxis(mode, el) {
-  if(window._cbXAxis===mode) return;
-  window._cbXAxis = mode;
   el.parentElement.querySelectorAll('.pill').forEach(p=>{
     p.classList.remove('on');
     p.style.background=''; p.style.color=''; p.style.borderColor='';
@@ -888,15 +954,10 @@ function clearCompareBuilder() {
     both.style.background='var(--accent)'; both.style.color='#0d0d0f'; both.style.borderColor='var(--accent)';
   });
 
-  window._cbXAxis = 'game';
-  const xgrp = document.getElementById('cb-xaxis-pills');
-  xgrp.querySelectorAll('.pill').forEach(p=>{
-    p.classList.remove('on'); p.style.background=''; p.style.color=''; p.style.borderColor='';
-  });
-  const gameEl = xgrp.querySelector('.pill[data-mode="game"]');
-  gameEl.classList.add('on');
-  gameEl.style.background='var(--accent)'; gameEl.style.color='#0d0d0f'; gameEl.style.borderColor='var(--accent)';
-
+  // both the source toggle and the shared time-series view are global state with
+  // synced UI copies (.src-pill / .ts-pill) — reset whichever has drifted from its
+  // default and trigger one full refresh so every tab reflects the reset state
+  let needsFullRefresh = false;
   if(window._sourceMode!=='all'){
     window._sourceMode='all';
     document.querySelectorAll('.src-pill').forEach(p=>{
@@ -905,32 +966,22 @@ function clearCompareBuilder() {
     document.querySelectorAll('.src-pill[data-mode="all"]').forEach(p=>{
       p.classList.add('on'); p.style.background='var(--accent)'; p.style.color='#0d0d0f'; p.style.borderColor='var(--accent)';
     });
-    refreshAll();
-  } else {
-    renderCompareBuilder();
+    needsFullRefresh = true;
   }
-}
+  if(window._tsMode!=='game'){
+    window._tsMode='game';
+    document.querySelectorAll('.ts-pill').forEach(p=>{
+      p.classList.remove('on'); p.style.background=''; p.style.color=''; p.style.borderColor='';
+    });
+    document.querySelectorAll('.ts-pill[data-mode="game"]').forEach(p=>{
+      p.classList.add('on'); p.style.background='var(--accent)'; p.style.color='#0d0d0f'; p.style.borderColor='var(--accent)';
+    });
+    needsFullRefresh = true;
+  }
 
-// x-values for the shared X-axis toggle: sequential game number, or a
-// timestamp with a small per-game jitter so games sharing a calendar date
-// render as distinct points instead of overlapping/averaging together
-function cbXValues(games) {
-  if(window._cbXAxis !== 'date') return games.map((g,i)=>i+1);
-  const groups = {};
-  games.forEach(g=>{ const k=g._d.toDateString(); (groups[k]=groups[k]||[]).push(g); });
-  const JITTER = 5*60*60*1000; // 5 hours
-  return games.map(g=>{
-    const grp = groups[g._d.toDateString()];
-    const idx = grp.indexOf(g);
-    return g._d.getTime() + (grp.length>1 ? (idx-(grp.length-1)/2)*JITTER : 0);
-  });
+  if(needsFullRefresh) refreshAll();
+  else renderCompareBuilder();
 }
-
-const cbXScale = mode => mode==='date'
-  ? {type:'linear',grid:{color:gridColor},
-     title:{display:true,text:'Date',color:'#6b6b7a',font:{size:10}},
-     ticks:{color:'#6b6b7a',maxTicksLimit:12,callback:v=>new Date(v).toLocaleDateString('en-US',{month:'short',year:'2-digit'})}}
-  : {type:'linear',...axisOpts('Game #'),ticks:{...axisOpts().ticks,stepSize:1,maxTicksLimit:24,autoSkip:true}};
 
 function buildCompareBuilder() {
   const el = document.getElementById('pane-cmpbuilder');
@@ -991,19 +1042,10 @@ function buildCompareBuilder() {
           <option value="">All</option>
           ${notes.map(n=>`<option>${n}</option>`).join('')}
         </select>
-        <label>Source</label>
-        <div style="display:flex;gap:6px">
-          <div class="pill src-pill" data-mode="irl" onclick="setSourceMode('irl',this)">In Person</div>
-          <div class="pill src-pill" data-mode="online" onclick="setSourceMode('online',this)">Chess.com</div>
-          <div class="pill src-pill on" data-mode="all" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setSourceMode('all',this)">All Games</div>
-        </div>
       </div>
       <div class="ctrls">
-        <label>X-axis</label>
-        <div id="cb-xaxis-pills" style="display:flex;gap:6px">
-          <div class="pill on" data-mode="game" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setCBXAxis('game',this)">By Game #</div>
-          <div class="pill" data-mode="date" onclick="setCBXAxis('date',this)">By Date</div>
-        </div>
+        <label>Time series view</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">${tsPillsHTML()}</div>
         <div class="pill" onclick="clearCompareBuilder()" style="margin-left:auto;color:var(--accent);border-color:var(--accent)">Clear All Filters</div>
       </div>
     </div>
@@ -1046,48 +1088,45 @@ function renderCompareBuilder() {
   const col = pc(p1);
   const strLabel = sr.type==='w'?'Win':sr.type==='l'?'Loss':'Draw';
   const strColor = sr.type==='w'?'var(--green)':sr.type==='l'?'var(--red)':'var(--accent)';
-  const xMode = window._cbXAxis;
+  const xMode = window._tsMode;
   const titleSuffix = p2 ? ` vs ${p2}` : '';
+  const isGameMode = xMode==='game';
 
   cbPage = 1;
   cbGames = filtered.slice().reverse();
 
   document.getElementById('cb-body').innerHTML = `
-    <div class="stat-grid" style="max-width:700px;margin-left:auto;margin-right:auto">
+    <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);max-width:760px;margin-left:auto;margin-right:auto">
       <div class="stat"><div class="lbl">${p1} Wins</div><div class="val" style="color:var(--green)">${s.w}</div></div>
       <div class="stat"><div class="lbl">Losses</div><div class="val" style="color:var(--red)">${s.l}</div></div>
       <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${s.d}</div></div>
       <div class="stat"><div class="lbl">Win %</div><div class="val" style="color:${col}">${s.pct}%</div></div>
       <div class="stat"><div class="lbl">Total Games</div><div class="val">${s.t}</div></div>
-    </div>
-    <div class="stat-grid" style="max-width:460px;margin:1.5rem auto 1.75rem">
       <div class="stat"><div class="lbl">Net Points<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(s.pts)}">${fmtPts(s.pts)}</div></div>
       <div class="stat"><div class="lbl">Avg Pts/Game<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(s.avgPts)}">${fmtPts(s.avgPts)}</div></div>
       <div class="stat"><div class="lbl">Current Streak</div><div class="val" style="color:${strColor};font-size:1.3rem;padding-top:.2rem">${sr.cur} ${strLabel}${sr.cur!==1?'s':''}</div></div>
     </div>
 
     ${filtered.length ? `
-      <div class="sec">Game by Game Results — ${p1}</div>
-      <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-        Each bar is one independent game in chronological order — green bars above the line are ${p1} wins, red bars below are losses, and draws leave a gap. No running total.
-      </p>
-      <div class="cbox"><canvas id="c-cb-results"></canvas></div>
-
       <div class="sec">Streak Momentum — ${p1}${titleSuffix}</div>
       <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-        Bar height tracks ${p1}'s running win streak — a win extends or instantly flips it (green = ${p1} ahead, red = behind), and a draw holds it steady, rendering in yellow.
+        ${isGameMode
+          ? `Bar height tracks ${p1}'s running win streak — a win extends or instantly flips it (green = ${p1} ahead, red = behind), and a draw holds it steady, rendering in yellow.`
+          : `Each bar sums ${p1}'s net wins and losses within the period (a win counts +1, a loss −1, a draw 0) — green when ${p1} comes out ahead, red when behind, yellow when even.`}
       </p>
       <div class="cbox"><canvas id="c-cb-streak"></canvas></div>
 
-      <div class="sec">Point Differential — ${p1}</div>
+      <div class="sec">Point Differential — ${p1}<span class="irl-tag">IRL only</span></div>
       <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-        Each point is one game's signed point differential from ${p1}'s perspective — a win plots at the recorded margin, a loss at its inverse. Draws and Chess.com games carry no differential and plot as hollow blue points at zero.
+        ${isGameMode
+          ? `Each point is one in-person game's signed point differential from ${p1}'s perspective — a win plots at the recorded margin, a loss at its inverse, and a draw plots as a hollow blue point at zero. Online games are not part of the points system and are excluded from this chart entirely.`
+          : `Each point sums every in-person game's signed point differential from ${p1}'s perspective within the period. Online games are not part of the points system and are excluded from this chart entirely.`}
       </p>
       <div class="cbox"><canvas id="c-cb-ptdiff"></canvas></div>
 
       <div class="sec">Cumulative Points — ${p1} (IRL only)</div>
       <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-        Running point total from ${p1}'s perspective across their filtered in-person games, starting at zero. Chess.com games are not part of the points system — they never appear here, regardless of the source toggle above.
+        Running point total from ${p1}'s perspective across their filtered in-person games, starting at zero${isGameMode ? '' : ', plotted as the running total at the end of each period'}. Chess.com games are not part of the points system — they never appear here, regardless of the source toggle above.
       </p>
       <div class="cbox"><canvas id="c-cb-cumpts"></canvas></div>
     ` : `
@@ -1099,87 +1138,74 @@ function renderCompareBuilder() {
   `;
 
   if(filtered.length){
-    renderCBResultsChart(filtered, p1, xMode);
     renderCBStreakChart(filtered, p1, p2, xMode);
-    renderCBPtDiffChart(filtered, p1, xMode);
+    renderCBPtDiffChart(filteredIRL, p1, xMode);
     renderCBCumPtsChart(filteredIRL, p1, xMode);
   } else {
-    dc('cb-results'); dc('cb-streak'); dc('cb-ptdiff'); dc('cb-cumpts');
+    dc('cb-streak'); dc('cb-ptdiff'); dc('cb-cumpts');
   }
 
   renderCompareBuilderTable(p1);
 }
 
-// one independent bar per game from p1's perspective: +1 win (green), -1 loss
-// (red); draws plot null, leaving a visible gap. No cumulative stacking.
-function renderCBResultsChart(games, p1, xMode) {
-  const xs = cbXValues(games);
-  const values = games.map(g=> g._draw ? null : (g._winner===p1 ? 1 : -1));
-  const series = games.map((g,i)=>({x:xs[i], y:values[i], g}));
-  dc('cb-results');
-  charts['cb-results']=new Chart(document.getElementById('c-cb-results'),{
-    type:'bar',
-    data:{datasets:[{
-      data:series,
-      backgroundColor:values.map(v=>v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
-      borderWidth:0, borderRadius:1, barPercentage:1.0, categoryPercentage:1.0,
-      ...(xMode==='date' ? {barThickness:3} : {})
-    }]},
-    options:{
-      parsing:false,
-      plugins:{
-        legend:{display:false},
-        tooltip:{callbacks:{
-          title:items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'',
-          label:c=>c.parsed.y>0?`${p1} won`:c.parsed.y<0?`${p1} lost`:'Draw'
-        }}
-      },
-      scales:{
-        x: cbXScale(xMode),
-        y:{min:-1.5,max:1.5,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
-      },
-      responsive:true,maintainAspectRatio:true
-    }
-  });
-}
-
-// cumulative win-streak value per game from p1's perspective (counts across
-// every opponent in the filtered set when Player 2 is "All opponents"). Wins
-// extend or instantly flip the streak; losses mirror that in reverse; draws
-// hold the streak steady and render in yellow.
+// Streak Momentum bars from p1's perspective (counts across every opponent in
+// the filtered set when Player 2 is "All opponents"). In Game # mode this is
+// the cumulative win-streak value per game (wins extend/flip it, losses mirror
+// that in reverse, draws hold it steady and render in yellow). In every
+// aggregated mode each bar instead sums that period's net wins/losses
+// (win=+1, loss=−1, draw=0) — green ahead, red behind, yellow when even.
 function renderCBStreakChart(games, p1, p2, xMode) {
-  const xs = cbXValues(games);
-  const isDraw = games.map(g=>!!g._draw);
-  let streakVal = 0;
-  const values = games.map(g=>{
-    if(g._draw) return streakVal;
-    streakVal = g._winner===p1 ? (streakVal<0 ? 1 : streakVal+1) : (streakVal>0 ? -1 : streakVal-1);
-    return streakVal;
-  });
-  const series = games.map((g,i)=>({x:xs[i], y:values[i], g}));
+  const oppLabel = p2 || 'opponent';
+  let series, isEven, tooltipTitle, tooltipLabel;
+
+  if(xMode==='game'){
+    let streakVal = 0;
+    const isDraw = games.map(g=>!!g._draw);
+    const values = games.map(g=>{
+      if(g._draw) return streakVal;
+      streakVal = g._winner===p1 ? (streakVal<0 ? 1 : streakVal+1) : (streakVal>0 ? -1 : streakVal-1);
+      return streakVal;
+    });
+    series = games.map((g,i)=>({x:i+1, y:values[i], g}));
+    isEven = isDraw;
+    tooltipTitle = items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'';
+    tooltipLabel = c=>isDraw[c.dataIndex]?`Draw — streak holds at ${c.parsed.y}`:`${c.parsed.y>0?p1:oppLabel} streak: ${Math.abs(c.parsed.y)}`;
+  } else {
+    const buckets = periodBuckets(games, xMode);
+    const values = buckets.map(b=>{
+      let net=0;
+      b.games.forEach(g=>{ if(!g._draw) net += g._winner===p1?1:-1; });
+      return net;
+    });
+    series = buckets.map((b,i)=>({x:b.x, y:values[i]}));
+    isEven = values.map(v=>v===0);
+    tooltipTitle = items=>items.length?tsTooltipLabel(items[0].parsed.x):'';
+    tooltipLabel = c=>{
+      const v=c.parsed.y;
+      if(v===0) return `Net result: even (${p1} and ${oppLabel} split the period)`;
+      return `${v>0?p1:oppLabel} net: ${Math.abs(v)} game${Math.abs(v)!==1?'s':''} ahead`;
+    };
+  }
+
+  const values = series.map(s=>s.y);
   const yMin = Math.min(0,...values)-1;
   const yMax = Math.max(0,...values)+1;
-  const oppLabel = p2 || 'opponent';
   dc('cb-streak');
   charts['cb-streak']=new Chart(document.getElementById('c-cb-streak'),{
     type:'bar',
     data:{datasets:[{
       data:series,
-      backgroundColor:values.map((v,i)=>isDraw[i]?'#e8d44d':v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
-      borderWidth:0, borderRadius:1, barPercentage:1.0, categoryPercentage:1.0,
-      ...(xMode==='date' ? {barThickness:3} : {})
+      backgroundColor:values.map((v,i)=>isEven[i]?'#e8d44d':v>0?'#4de8a8':v<0?'#e84d6f':'transparent'),
+      borderWidth:0, borderRadius:1, barPercentage:1.0, categoryPercentage:1.0
     }]},
     options:{
       parsing:false,
       plugins:{
         legend:{display:false},
-        tooltip:{callbacks:{
-          title:items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'',
-          label:c=>isDraw[c.dataIndex]?`Draw — streak holds at ${c.parsed.y}`:`${c.parsed.y>0?p1:oppLabel} streak: ${Math.abs(c.parsed.y)}`
-        }}
+        tooltip:{callbacks:{title:tooltipTitle, label:tooltipLabel}}
       },
       scales:{
-        x: cbXScale(xMode),
+        x: tsXScale(),
         y:{min:yMin,max:yMax,...axisOpts(),ticks:{...axisOpts().ticks,stepSize:1},grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
       },
       responsive:true,maintainAspectRatio:true
@@ -1187,15 +1213,42 @@ function renderCBStreakChart(games, p1, p2, xMode) {
   });
 }
 
-// per-game point differential from p1's perspective (gamePoints already
-// encodes the "winner gets the signed margin, loser the inverse" rule).
-// Draws and Chess.com games carry no differential — they plot as hollow blue
-// neutral points at zero rather than colored win/loss markers.
-function renderCBPtDiffChart(games, p1, xMode) {
-  const xs = cbXValues(games);
-  const neutral = games.map(g => g._draw || g.source!=='IRL');
-  const values = games.map((g,i)=> neutral[i] ? 0 : gamePoints(g, p1));
-  const series = games.map((g,i)=>({x:xs[i], y:values[i], g}));
+// Point Differential — IRL games only, no exceptions: `gamesIRL` already
+// excludes every Chess.com/Online game from the dataset entirely, so the line
+// only ever connects in-person points (an Online game between two IRL games is
+// simply skipped — the line bridges the surrounding IRL points directly). In
+// Game # mode each point is one game's signed differential from p1's
+// perspective (draws plot as hollow blue neutral points at zero); in aggregated
+// modes each point sums every IRL game's differential within that period.
+function renderCBPtDiffChart(gamesIRL, p1, xMode) {
+  let series, pointBg, pointBorder, pointRadius, pointBorderWidth, tooltipTitle, tooltipLabel;
+
+  if(xMode==='game'){
+    const isDraw = gamesIRL.map(g=>!!g._draw);
+    const values = gamesIRL.map(g=> g._draw ? 0 : gamePoints(g, p1));
+    series = gamesIRL.map((g,i)=>({x:i+1, y:values[i], g}));
+    pointBg = gamesIRL.map((g,i)=>isDraw[i]?'transparent':(values[i]>=0?'#4de8a8':'#e84d6f'));
+    pointBorder = gamesIRL.map((g,i)=>isDraw[i]?'#4d9fe8':(values[i]>=0?'#4de8a8':'#e84d6f'));
+    pointRadius = gamesIRL.map((g,i)=>isDraw[i]?4:2);
+    pointBorderWidth = gamesIRL.map((g,i)=>isDraw[i]?1.5:1);
+    tooltipTitle = items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'';
+    tooltipLabel = c=>{
+      const g=c.raw.g;
+      if(g._draw) return 'Draw — no point differential';
+      return `${fmtPts(c.parsed.y)} pts (${p1} perspective)`;
+    };
+  } else {
+    const buckets = periodBuckets(gamesIRL, xMode);
+    const sums = buckets.map(b=> b.games.reduce((a,g)=>a+gamePoints(g,p1),0));
+    series = buckets.map((b,i)=>({x:b.x, y:sums[i]}));
+    pointBg = sums.map(v=> v>0?'#4de8a8':v<0?'#e84d6f':'#e8d44d');
+    pointBorder = pointBg;
+    pointRadius = 3;
+    pointBorderWidth = 1;
+    tooltipTitle = items=>items.length?tsTooltipLabel(items[0].parsed.x):'';
+    tooltipLabel = c=>`${fmtPts(c.parsed.y)} pts summed (${p1} perspective)`;
+  }
+
   dc('cb-ptdiff');
   charts['cb-ptdiff']=new Chart(document.getElementById('c-cb-ptdiff'),{
     type:'line',
@@ -1207,10 +1260,10 @@ function renderCBPtDiffChart(games, p1, xMode) {
       }},
       backgroundColor:'transparent',
       borderColor:'#4de8a8',
-      pointBackgroundColor:games.map((g,i)=>neutral[i]?'transparent':(values[i]>=0?'#4de8a8':'#e84d6f')),
-      pointBorderColor:games.map((g,i)=>neutral[i]?'#4d9fe8':(values[i]>=0?'#4de8a8':'#e84d6f')),
-      pointRadius:games.map((g,i)=>neutral[i]?4:2),
-      pointBorderWidth:games.map((g,i)=>neutral[i]?1.5:1),
+      pointBackgroundColor:pointBg,
+      pointBorderColor:pointBorder,
+      pointRadius:pointRadius,
+      pointBorderWidth:pointBorderWidth,
       pointHoverRadius:5,
       tension:0,
       borderWidth:2.5
@@ -1219,18 +1272,10 @@ function renderCBPtDiffChart(games, p1, xMode) {
       parsing:false,
       plugins:{
         legend:{display:false},
-        tooltip:{callbacks:{
-          title:items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'',
-          label:c=>{
-            const g=c.raw.g;
-            if(g.source!=='IRL') return 'Chess.com game — not part of the points system';
-            if(g._draw) return 'Draw — no point differential';
-            return `${fmtPts(c.parsed.y)} pts (${p1} perspective)`;
-          }
-        }}
+        tooltip:{callbacks:{title:tooltipTitle, label:tooltipLabel}}
       },
       scales:{
-        x: cbXScale(xMode),
+        x: tsXScale(),
         y:{...axisOpts('Point Differential'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
       },
       responsive:true,maintainAspectRatio:true,
@@ -1242,13 +1287,24 @@ function renderCBPtDiffChart(games, p1, xMode) {
 // running point total from p1's perspective — IRL games only, always,
 // regardless of the source toggle (gamePoints already returns 0 for any
 // Chess.com game, and `gamesIRL` excludes them from the dataset entirely).
+// In aggregated modes the running total is updated through every game in
+// chronological order, sampling the final value at the end of each period.
 function renderCBCumPtsChart(gamesIRL, p1, xMode) {
-  const xs = cbXValues(gamesIRL);
+  let series, tooltipTitle;
   let cum = 0;
-  const series = gamesIRL.map((g,i)=>{
-    cum += gamePoints(g, p1);
-    return {x:xs[i], y:cum, g};
-  });
+
+  if(xMode==='game'){
+    series = gamesIRL.map((g,i)=>{ cum += gamePoints(g, p1); return {x:i+1, y:cum, g}; });
+    tooltipTitle = items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'';
+  } else {
+    const buckets = periodBuckets(gamesIRL, xMode);
+    series = buckets.map(b=>{
+      b.games.forEach(g=> cum += gamePoints(g, p1));
+      return {x:b.x, y:cum};
+    });
+    tooltipTitle = items=>items.length?tsTooltipLabel(items[0].parsed.x):'';
+  }
+
   dc('cb-cumpts');
   charts['cb-cumpts']=new Chart(document.getElementById('c-cb-cumpts'),{
     type:'line',
@@ -1270,12 +1326,12 @@ function renderCBCumPtsChart(gamesIRL, p1, xMode) {
       plugins:{
         legend:{display:false},
         tooltip:{callbacks:{
-          title:items=>items.length?`Game ${items[0].dataIndex+1} — ${items[0].raw.g._d.toLocaleDateString()}`:'',
+          title:tooltipTitle,
           label:c=>`${fmtPts(c.parsed.y)} pts (${p1} cumulative)`
         }}
       },
       scales:{
-        x: cbXScale(xMode),
+        x: tsXScale(),
         y:{...axisOpts('Cumulative Points'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
       },
       responsive:true,maintainAspectRatio:true,
@@ -1322,7 +1378,6 @@ function buildRunning() {
   const el = document.getElementById('pane-running');
   const main = PLAYERS.filter(p=>pStats(p,G).t>=5);
   window._runActive = new Set(main);
-  window._runMode = 'game';
   window._runView = 'winpct';
   el.innerHTML = `
     <div class="sec" style="margin-top:0" id="run-sec-title">Cumulative win% — every game counts</div>
@@ -1337,11 +1392,8 @@ function buildRunning() {
       </div>
     </div>
     <div class="ctrls">
-      <label>X-axis</label>
-      <div style="display:flex;gap:6px" id="run-mode-pills">
-        <div class="pill on" data-mode="game" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setRunMode('game',this)">By Game #</div>
-        <div class="pill" data-mode="date" onclick="setRunMode('date',this)">By Date</div>
-      </div>
+      <label>Time series view</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${tsPillsHTML()}</div>
     </div>
     <div class="ctrls">
       <label>Toggle players</label>
@@ -1357,20 +1409,6 @@ function buildRunning() {
 function toggleRun(p, el) {
   if(window._runActive.has(p)){window._runActive.delete(p);el.classList.remove('on');el.style.background='';el.style.color='';el.style.borderColor='';}
   else{window._runActive.add(p);el.classList.add('on');el.style.background=pc(p);el.style.color='#0d0d0f';el.style.borderColor=pc(p);}
-  renderRunning();
-}
-
-function setRunMode(mode, el) {
-  if(window._runMode===mode) return;
-  window._runMode=mode;
-  document.querySelectorAll('#run-mode-pills .pill').forEach(p=>{
-    p.classList.remove('on');
-    p.style.background=''; p.style.color=''; p.style.borderColor='';
-  });
-  el.classList.add('on');
-  el.style.background='var(--accent)';
-  el.style.color='#0d0d0f';
-  el.style.borderColor='var(--accent)';
   renderRunning();
 }
 
@@ -1390,47 +1428,70 @@ function setRunView(view, el) {
 
 function renderRunning() {
   const players=[...window._runActive];
-  const mode = window._runMode||'game';
+  const mode = window._tsMode;
+  const isGame = mode==='game';
   const view = window._runView||'winpct';
   const isPts = view==='points';
 
   document.getElementById('run-sec-title').textContent = isPts
-    ? 'Cumulative points — IRL games only'
-    : 'Cumulative win% — every game counts';
+    ? (isGame ? 'Cumulative points — IRL games only' : 'Cumulative points by period — IRL games only')
+    : (isGame ? 'Cumulative win% — every game counts' : 'Win % by period');
   document.getElementById('run-desc').textContent = isPts
-    ? 'Each player starts at 0. A win adds the recorded differential exactly as logged (it can be negative); a loss subtracts the winner’s differential. Draws and ungraded games add nothing. Chess.com games are not part of the points system — they never move this line, never appear as markers, and are unaffected by the source toggle above.'
-    : 'Game 1 win = 100%. Game 2 loss = 50%. Game 3 win = 66%. Each dot is one game played. Respects the source toggle above.';
+    ? (isGame
+        ? 'Each player starts at 0. A win adds the recorded differential exactly as logged (it can be negative); a loss subtracts the winner’s differential. Draws and ungraded games add nothing. Chess.com games are not part of the points system — they never move this line, never appear as markers, and are unaffected by the source toggle above.'
+        : 'Each player starts at 0; every in-person game in the period updates the running total in chronological order, and the line samples that total at the end of each period. Chess.com games are not part of the points system and never move this line.')
+    : (isGame
+        ? 'Game 1 win = 100%. Game 2 loss = 50%. Game 3 win = 66%. Each dot is one game played. Respects the source toggle above.'
+        : 'Each point is the win % computed from that period\'s games alone (not a running total). Respects the source toggle above.');
 
   // Win% always respects the global source toggle; cumulative points is IRL-only,
   // always — Chess.com games are filtered out of the dataset entirely (GIRL) so
   // they cannot appear as data points, markers, or gaps on the line in any form.
-  const ds=players.map(p=>({
-    label:p,
-    data: isPts
-      ? (mode==='date' ? cumPtsByDate(p,GIRL) : cumPtsByGame(p,GIRL))
-      : (mode==='date' ? cumPctByDate(p,sourceFiltered(G)) : cumPct(p,sourceFiltered(G))),
-    borderColor:pc(p),
-    backgroundColor:'transparent',
-    tension:0.25,
-    pointRadius:0,
-    pointHoverRadius:5,
-    borderWidth:2.5
-  }));
+  // In aggregated modes (Daily/Weekly/Monthly/Annually), win% is computed fresh
+  // from each period's games (not cumulative), while cumulative points keeps a
+  // running total across all history and samples it at the end of each period.
+  const ds=players.map(p=>{
+    let data;
+    if(isGame){
+      data = isPts ? cumPtsByGame(p,GIRL) : cumPct(p,sourceFiltered(G));
+    } else {
+      const pool = isPts ? GIRL : sourceFiltered(G);
+      const pg = pool.filter(g=>g['Player 1']===p||g['Player 2']===p);
+      const buckets = periodBuckets(pg, mode);
+      if(isPts){
+        let cum=0;
+        data = buckets.map(b=>{ b.games.forEach(g=>cum+=gamePoints(g,p)); return {x:b.x,y:cum}; });
+      } else {
+        data = buckets.map(b=>{
+          let w=0,t=0;
+          b.games.forEach(g=>{ t++; if(!g._draw&&g._winner===p) w++; });
+          return {x:b.x, y:Math.round(w/t*100)};
+        });
+      }
+    }
+    return {
+      label:p,
+      data,
+      borderColor:pc(p),
+      backgroundColor:'transparent',
+      tension:0.25,
+      pointRadius:0,
+      pointHoverRadius:5,
+      borderWidth:2.5
+    };
+  });
   dc('running');
 
-  const xScale = mode==='date'
-    ? {type:'linear',grid:{color:gridColor},
-       title:{display:true,text:'Date',color:'#6b6b7a',font:{size:10}},
-       ticks:{color:'#6b6b7a',callback:v=>new Date(v).toLocaleDateString('en-US',{month:'short',year:'2-digit'})}}
-    : {type:'linear',...axisOpts('Game #')};
+  const xScale = tsXScale();
 
   const yScale = isPts
     ? {...axisOpts('Cumulative Points'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
     : {min:0,max:100,...axisOpts('Win %'),ticks:{color:'#6b6b7a',callback:v=>v+'%'}};
 
   const tooltipCallbacks={};
-  if(mode==='date') tooltipCallbacks.title = items=>items.length?new Date(items[0].parsed.x).toLocaleDateString():'';
+  if(!isGame) tooltipCallbacks.title = items=>items.length?tsTooltipLabel(items[0].parsed.x):'';
   if(isPts) tooltipCallbacks.label = c=>`${c.dataset.label}: ${fmtPts(c.parsed.y)} pts`;
+  else if(!isGame) tooltipCallbacks.label = c=>`${c.dataset.label}: ${c.parsed.y}%`;
 
   charts['running']=new Chart(document.getElementById('c-running'),{
     type:'line',data:{datasets:ds},
