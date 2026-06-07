@@ -91,6 +91,11 @@ select:focus,input:focus{border-color:var(--accent)}
 .pill{background:var(--s2);border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;padding:3px 11px;border-radius:20px;cursor:pointer;transition:all .15s;user-select:none}
 .pill.on{color:var(--bg);border-color:transparent;font-weight:500}
 
+/* SOURCE TOGGLE BAR */
+.src-bar{display:flex;align-items:center;gap:.6rem;padding:.85rem 2rem;border-bottom:1px solid var(--border);background:var(--s1);flex-wrap:wrap}
+.src-bar label{font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.irl-tag{font-size:8px;letter-spacing:.07em;color:var(--muted2);text-transform:uppercase;font-weight:400;margin-left:4px;vertical-align:middle}
+
 /* TABLE */
 .tbl-wrap{overflow-x:auto;background:var(--s1);border:1px solid var(--border);border-radius:10px}
 table{width:100%;border-collapse:collapse;font-size:12px}
@@ -190,6 +195,7 @@ const pc = p => PC[p] || '#888888';
 // winner's perspective with sign intact — the loser gets the exact inverse.
 // Draws and games with no recorded differential count as 0 for both players.
 function gamePoints(g, player) {
+  if(g.source!=='IRL') return 0; // points are an IRL-only concept — Chess.com games never contribute
   if(g._draw) return 0;
   if(g._winner===player) return g._diff;
   if(g._loser===player) return -g._diff;
@@ -198,6 +204,7 @@ function gamePoints(g, player) {
 const fmtPts = v => (v>0?'+':'')+v;
 const ptsColor = v => v>0?'var(--green)':v<0?'var(--red)':'var(--muted)';
 function marginTooltip(g) {
+  if(g.source!=='IRL') return `${g['Game ID']}: Played on Chess.com — no point differential recorded`;
   if(g._draw) return 'Draw — no points awarded';
   if(!g._diff) return 'No point differential recorded — 0 pts either way';
   const sign = g._diff>=0?'+':'';
@@ -207,8 +214,15 @@ function marginTooltip(g) {
 }
 
 // ─── DATA ─────────────────────────────────────────────────────────────────────
-let G = [], PLAYERS = [];
+let G = [], GIRL = [], PLAYERS = [];
 const charts = {};
+
+// global source toggle — filters every non-points view; points views always use GIRL (IRL only)
+window._sourceMode = 'all'; // 'irl' | 'online' | 'all'
+const sourceFiltered = games => window._sourceMode==='irl' ? games.filter(g=>g.source==='IRL')
+                              : window._sourceMode==='online' ? games.filter(g=>g.source==='Online')
+                              : games;
+
 const dc = id => { if(charts[id]){charts[id].destroy(); delete charts[id];} };
 
 function parseCSVLine(line) {
@@ -244,6 +258,7 @@ function parseData(text) {
     r._loser  = isDraw ? null : (r['Loser']||'').trim();
     r._diff   = parseInt(r['Point Differential'])||0;
     r._timed  = notes.includes('timed') || notes.includes('time out');
+    r.source  = 'IRL';
     games.push(r);
   }
   games.sort((a,b)=>a._d-b._d);
@@ -256,18 +271,99 @@ function getPlayers(games) {
   return [...s].filter(p=>p&&p.length>1).sort();
 }
 
+// ─── CHESS.COM LIVE DATA ──────────────────────────────────────────────────────
+const CHESS_USERNAMES = { John:'jstrev', Josh:'jzyoskowitz', Connor:'conniefizz', Mak:'mpensabene', Russell:'ssuRFitz' };
+const usernameToName = {};
+Object.entries(CHESS_USERNAMES).forEach(([name,u])=>{ usernameToName[u.toLowerCase()] = name; });
+
+// every (year, month) pair from `startDate` through the current month, inclusive
+function monthsFrom(startDate) {
+  const months=[];
+  let y=startDate.getFullYear(), m=startDate.getMonth()+1;
+  const now=new Date(), ny=now.getFullYear(), nm=now.getMonth()+1;
+  while(y<ny || (y===ny && m<=nm)){
+    months.push({y,m});
+    m++; if(m>12){m=1;y++;}
+  }
+  return months;
+}
+
+// converts a Chess.com API game object into our unified game shape, or null if
+// either side isn't a friend-group username (outside opponents are ignored)
+function chessGameToRecord(cg) {
+  const wU = (cg.white&&cg.white.username||'').toLowerCase();
+  const bU = (cg.black&&cg.black.username||'').toLowerCase();
+  const p1 = usernameToName[wU], p2 = usernameToName[bU];
+  if(!p1 || !p2 || p1===p2) return null;
+  const wRes = cg.white.result, bRes = cg.black.result;
+  const isDraw = wRes!=='win' && bRes!=='win';
+  const winner = isDraw ? null : (wRes==='win' ? p1 : p2);
+  const loser  = isDraw ? null : (wRes==='win' ? p2 : p1);
+  const d = new Date(cg.end_time*1000);
+  return {
+    'Game ID': 'CC-'+(cg.uuid || (cg.url||'').split('/').pop() || cg.end_time),
+    'Player 1': p1, 'Player 2': p2,
+    'Color 1': 'White', 'Color 2': 'Black',
+    'Winner': winner||'', 'Loser': loser||'',
+    'Date': d.toISOString().slice(0,10),
+    'Notes': '', 'Point Differential': 'Online',
+    source: 'Online',
+    _d: d,
+    _mo: d.toLocaleString('default',{month:'short',year:'2-digit'}),
+    _moFull: d.toLocaleString('default',{month:'short',year:'numeric'}),
+    _draw: isDraw, _winner: winner, _loser: loser, _diff: 'Online', _timed: false
+  };
+}
+
+// fetches every friend-group player's archives in parallel, from `startDate`
+// forward, dedupes shared games, and keeps only friend-vs-friend matchups.
+// Any single request failing is skipped silently — the dashboard never breaks.
+async function fetchChessCom(startDate) {
+  const months = monthsFrom(startDate);
+  const tasks = [];
+  Object.values(CHESS_USERNAMES).forEach(username=>{
+    months.forEach(({y,m})=>{
+      const mm = String(m).padStart(2,'0');
+      tasks.push(
+        fetch(`https://api.chess.com/pub/player/${username}/games/${y}/${mm}`)
+          .then(r => r.ok ? r.json() : {games:[]})
+          .then(j => j.games||[])
+          .catch(()=>[])
+      );
+    });
+  });
+  const results = await Promise.all(tasks);
+  const seen = new Set();
+  const games = [];
+  results.flat().forEach(cg=>{
+    const key = cg.uuid || cg.url;
+    if(!key || seen.has(key)) return;
+    seen.add(key);
+    const rec = chessGameToRecord(cg);
+    // the API only paginates by month, so the start month can include games
+    // from earlier in that month — trim to "earliest sheet date forward" exactly
+    if(rec && rec._d >= startDate) games.push(rec);
+  });
+  games.sort((a,b)=>a._d-b._d);
+  return games;
+}
+
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 function pStats(player, games) {
+  // `games` drives the W/L/D record (respects the source toggle); points are
+  // an IRL-only concept and always come from GIRL regardless of what's passed.
   const pg = games.filter(g=>g['Player 1']===player||g['Player 2']===player);
-  let w=0,l=0,d=0,pts=0;
+  let w=0,l=0,d=0;
   pg.forEach(g=>{
     if(g._draw) d++;
     else if(g._winner===player) w++;
     else l++;
-    pts += gamePoints(g, player);
   });
   const t=w+l+d;
-  return {w,l,d,t,pct:t?Math.round(w/t*100):0,pts,avgPts:t?+(pts/t).toFixed(1):0,pg};
+  const ipg = GIRL.filter(g=>g['Player 1']===player||g['Player 2']===player);
+  let pts=0;
+  ipg.forEach(g=>{ pts += gamePoints(g, player); });
+  return {w,l,d,t,pct:t?Math.round(w/t*100):0,pts,avgPts:ipg.length?+(pts/ipg.length).toFixed(1):0,pg};
 }
 
 function h2h(player, games) {
@@ -278,6 +374,11 @@ function h2h(player, games) {
     if(g._draw) opp[o].d++;
     else if(g._winner===player) opp[o].w++;
     else opp[o].l++;
+  });
+  // points tally is IRL-only — always pulled from GIRL, ignoring the source toggle
+  GIRL.filter(g=>g['Player 1']===player||g['Player 2']===player).forEach(g=>{
+    const o = g['Player 1']===player?g['Player 2']:g['Player 1'];
+    if(!opp[o]) opp[o]={w:0,l:0,d:0,pts:0};
     opp[o].pts += gamePoints(g, player);
   });
   return opp;
@@ -368,15 +469,60 @@ const gridColor='rgba(255,255,255,0.04)';
 const axisOpts=(label)=>({ticks:{color:'#6b6b7a'},grid:{color:gridColor},title:label?{display:true,text:label,color:'#6b6b7a',font:{size:10}}:{}});
 
 // ─── BUILD ────────────────────────────────────────────────────────────────────
+let _ccStatusHTML = '';
+function setCCStatus(html) {
+  _ccStatusHTML = html;
+  const el = document.getElementById('cc-status');
+  if(el) el.innerHTML = html;
+}
+
+function updateMeta() {
+  const sessions = [...new Set(G.map(g=>g['Date']))].length;
+  document.getElementById('meta').innerHTML =
+    `${G.length} games &nbsp;·&nbsp; ${sessions} sessions<br>`+
+    `${G[0]._d.toLocaleDateString('en-US',{month:'short',year:'numeric'})} → ${G[G.length-1]._d.toLocaleDateString('en-US',{month:'short',year:'numeric'})} &nbsp;·&nbsp; Live`+
+    `<div id="cc-status" style="margin-top:4px">${_ccStatusHTML}</div>`;
+}
+
+function setSourceMode(mode, el) {
+  if(window._sourceMode===mode) return;
+  window._sourceMode = mode;
+  document.querySelectorAll('#source-toggle .pill').forEach(p=>{
+    p.classList.remove('on');
+    p.style.background=''; p.style.color=''; p.style.borderColor='';
+  });
+  el.classList.add('on');
+  el.style.background='var(--accent)';
+  el.style.color='#0d0d0f';
+  el.style.borderColor='var(--accent)';
+  refreshAll();
+}
+
+// re-renders every tab's content in place (no rebuild of controls/selections),
+// used both when the source toggle changes and when Chess.com data appends
+function refreshAll() {
+  buildOverview();
+  const psel = document.getElementById('sel-player');
+  renderPlayer(psel ? psel.value : (PLAYERS.includes('John')?'John':PLAYERS[0]));
+  renderH2H();
+  renderCompare();
+  renderRunning();
+  filterG();
+}
+
 function boot(games) {
   G = games;
+  GIRL = G.filter(g=>g.source==='IRL');
   PLAYERS = getPlayers(games);
-  const sessions = [...new Set(games.map(g=>g['Date']))].length;
-  document.getElementById('meta').innerHTML =
-    `${games.length} games &nbsp;·&nbsp; ${sessions} sessions<br>`+
-    `${games[0]._d.toLocaleDateString('en-US',{month:'short',year:'numeric'})} → ${games[games.length-1]._d.toLocaleDateString('en-US',{month:'short',year:'numeric'})} &nbsp;·&nbsp; Live`;
+  updateMeta();
 
   document.getElementById('app').innerHTML = `
+    <div class="src-bar" id="source-toggle">
+      <label>Source</label>
+      <div class="pill" data-mode="irl" onclick="setSourceMode('irl',this)">In Person</div>
+      <div class="pill" data-mode="online" onclick="setSourceMode('online',this)">Chess.com</div>
+      <div class="pill on" data-mode="all" style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)" onclick="setSourceMode('all',this)">All Games</div>
+    </div>
     <nav class="tabs">
       <button class="tab on" onclick="sw('overview',this)">Overview</button>
       <button class="tab" onclick="sw('player',this)">Player</button>
@@ -410,12 +556,13 @@ function sw(id, btn) {
 // ─── OVERVIEW ─────────────────────────────────────────────────────────────────
 function buildOverview() {
   const el = document.getElementById('pane-overview');
-  const draws = G.filter(g=>g._draw).length;
-  const sessions = [...new Set(G.map(g=>g['Date']))].length;
-  const biggestWin = G.filter(g=>!g._draw&&g._diff>0).sort((a,b)=>b._diff-a._diff)[0];
+  const SF = sourceFiltered(G);
+  const draws = SF.filter(g=>g._draw).length;
+  const sessions = [...new Set(SF.map(g=>g['Date']))].length;
+  const biggestWin = SF.filter(g=>!g._draw&&typeof g._diff==='number'&&g._diff>0).sort((a,b)=>b._diff-a._diff)[0];
 
-  // leaderboard — min 5 games
-  const lb = PLAYERS.map(p=>({name:p,...pStats(p,G)}))
+  // leaderboard — min 5 games (record respects the source toggle; points always IRL)
+  const lb = PLAYERS.map(p=>({name:p,...pStats(p,SF)}))
     .filter(p=>p.t>=5).sort((a,b)=>b.pct-a.pct||b.w-a.w);
 
   const rankClass = i => i===0?'gold':i===1?'silver':i===2?'bronze':'';
@@ -449,20 +596,20 @@ function buildOverview() {
 
   el.innerHTML = `
     <div class="stat-grid">
-      <div class="stat"><div class="lbl">Total Games</div><div class="val" style="color:var(--accent)">${G.length}</div></div>
+      <div class="stat"><div class="lbl">Total Games</div><div class="val" style="color:var(--accent)">${SF.length}</div></div>
       <div class="stat"><div class="lbl">Sessions</div><div class="val">${sessions}</div></div>
       <div class="stat"><div class="lbl">Players</div><div class="val">${PLAYERS.length}</div></div>
-      <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${draws}</div><div class="sub">${Math.round(draws/G.length*100)}% of games</div></div>
+      <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${draws}</div><div class="sub">${SF.length?Math.round(draws/SF.length*100):0}% of games</div></div>
       ${biggestWin?`<div class="stat"><div class="lbl">Biggest Margin</div><div class="val" style="color:var(--red);font-size:1.5rem">${biggestWin._diff} pts</div><div class="sub">${biggestWin._winner} beat ${biggestWin._loser}</div></div>`:''}
     </div>
 
     <div class="sec">Leaderboard</div>
     <div class="lb">
-      <div class="lb-hdr"><div>#</div><div>Player</div><div style="text-align:right">W</div><div style="text-align:right">L</div><div style="text-align:right">D</div><div style="text-align:right">GP</div><div style="text-align:right">Points</div><div style="text-align:right">Avg Pts</div><div style="text-align:right">Win%</div></div>
+      <div class="lb-hdr"><div>#</div><div>Player</div><div style="text-align:right">W</div><div style="text-align:right">L</div><div style="text-align:right">D</div><div style="text-align:right">GP</div><div style="text-align:right">Points<span class="irl-tag">IRL only</span></div><div style="text-align:right">Avg Pts<span class="irl-tag">IRL only</span></div><div style="text-align:right">Win%</div></div>
       ${lbRows}
     </div>
 
-    <div class="sec">Points Leaderboard</div>
+    <div class="sec">Points Leaderboard <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
     <div class="lb">
       <div class="lbp-hdr"><div>#</div><div>Player</div><div style="text-align:right">Points</div><div style="text-align:right">Avg Pts</div><div style="text-align:right">GP</div></div>
       ${lbPtsRows}
@@ -478,7 +625,7 @@ function buildOverview() {
 
   // sessions bar
   const moMap={};
-  G.forEach(g=>{if(!moMap[g._moFull])moMap[g._moFull]=0;moMap[g._moFull]++;});
+  SF.forEach(g=>{if(!moMap[g._moFull])moMap[g._moFull]=0;moMap[g._moFull]++;});
   const mos=Object.keys(moMap);
   dc('sessions');
   charts['sessions']=new Chart(document.getElementById('c-sessions'),{
@@ -521,9 +668,10 @@ function buildPlayer() {
 }
 
 function renderPlayer(p) {
-  const s = pStats(p, G);
-  const opp = h2h(p, G);
-  const sr = streak(p, G);
+  const SF = sourceFiltered(G);
+  const s = pStats(p, SF);     // record/win% respect the toggle; s.pts/s.avgPts are always IRL-only
+  const opp = h2h(p, SF);      // w/l/d respect the toggle; opp[x].pts is always IRL-only
+  const sr = streak(p, SF);
   const col = pc(p);
   const strLabel = sr.type==='w'?'Win':sr.type==='l'?'Loss':'Draw';
   const strColor = sr.type==='w'?'var(--green)':sr.type==='l'?'var(--red)':'var(--accent)';
@@ -543,7 +691,7 @@ function renderPlayer(p) {
         <span style="color:var(--red)">${r.l}L</span>
         <span>${t} games</span>
       </div>
-      <div style="font-family:'DM Mono',monospace;font-size:11px;color:${ptsColor(r.pts)};margin-top:.45rem;text-align:center">Net pts vs ${o}: ${fmtPts(r.pts)}</div>
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:${ptsColor(r.pts)};margin-top:.45rem;text-align:center">Net pts vs ${o}: ${fmtPts(r.pts)}<span class="irl-tag">IRL only</span></div>
     </div>`;
   }).join('');
 
@@ -554,8 +702,8 @@ function renderPlayer(p) {
       <div class="stat"><div class="lbl">Losses</div><div class="val" style="color:var(--red)">${s.l}</div></div>
       <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${s.d}</div></div>
       <div class="stat"><div class="lbl">Games</div><div class="val">${s.t}</div></div>
-      <div class="stat"><div class="lbl">Total Pts</div><div class="val" style="color:${ptsColor(s.pts)}">${fmtPts(s.pts)}</div></div>
-      <div class="stat"><div class="lbl">Avg Pts/Game</div><div class="val" style="color:${ptsColor(s.avgPts)}">${fmtPts(s.avgPts)}</div></div>
+      <div class="stat"><div class="lbl">Total Pts<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(s.pts)}">${fmtPts(s.pts)}</div></div>
+      <div class="stat"><div class="lbl">Avg Pts/Game<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(s.avgPts)}">${fmtPts(s.avgPts)}</div></div>
       <div class="stat"><div class="lbl">Current Streak</div><div class="val" style="color:${strColor};font-size:1.3rem;padding-top:.2rem">${sr.cur} ${strLabel}${sr.cur!==1?'s':''}</div></div>
       ${beaten[0]?`<div class="stat"><div class="lbl">Most Beaten</div><div class="val" style="color:${pc(beaten[0][0])};font-size:1.2rem;padding-top:.25rem">${beaten[0][0]}</div><div class="sub">${beaten[0][1].w} wins</div></div>`:''}
       ${hardest[0]?`<div class="stat"><div class="lbl">Hardest Opp</div><div class="val" style="color:${pc(hardest[0][0])};font-size:1.2rem;padding-top:.25rem">${hardest[0][0]}</div><div class="sub">${hardest[0][1].l} losses</div></div>`:''}
@@ -564,15 +712,15 @@ function renderPlayer(p) {
     <div class="sec">Win % by month</div>
     <div class="cbox"><canvas id="c-p-monthly"></canvas></div>
 
-    <div class="sec">Net points by month</div>
+    <div class="sec">Net points by month <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
     <div class="cbox"><canvas id="c-p-pts-monthly"></canvas></div>
 
     <div class="sec">Record vs each opponent</div>
     <div class="h2h-grid">${cards}</div>
   `;
 
-  // monthly win% chart
-  const bm = byMonth(p, G);
+  // monthly win% chart — respects the source toggle
+  const bm = byMonth(p, SF);
   const mls = Object.keys(bm);
   const mpcts = mls.map(m=>bm[m].t?Math.round(bm[m].w/bm[m].t*100):0);
   dc('p-monthly');
@@ -586,8 +734,10 @@ function renderPlayer(p) {
     }
   });
 
-  // net points by month chart — bars can go positive or negative around a marked zero line
-  const pbm = pointsByMonth(p, G);
+  // net points by month chart — IRL only, always, regardless of the source toggle.
+  // Chess.com games never appear here in any form (gamePoints already returns 0
+  // for them, and pointsByMonth only ever sees IRL games via GIRL).
+  const pbm = pointsByMonth(p, GIRL);
   const pmls = Object.keys(pbm);
   const pmpts = pmls.map(m=>pbm[m]);
   dc('p-pts-monthly');
@@ -636,15 +786,17 @@ function renderH2H() {
   const el=document.getElementById('h2h-body');
   if(p1===p2){el.innerHTML='<p style="color:var(--muted);font-family:DM Mono,monospace;font-size:12px;padding:1rem">Pick two different players.</p>';return;}
 
-  h2hChrono = G.filter(g=>(g['Player 1']===p1&&g['Player 2']===p2)||(g['Player 1']===p2&&g['Player 2']===p1));
+  const matchup = g => (g['Player 1']===p1&&g['Player 2']===p2)||(g['Player 1']===p2&&g['Player 2']===p1);
+  h2hChrono = sourceFiltered(G).filter(matchup);          // record + log respect the source toggle
+  const h2hChronoIRL = GIRL.filter(matchup);               // points are always IRL-only, ignoring the toggle
   h2hGames = h2hChrono.slice().reverse();
   let p1w=0,p2w=0,dr=0,p1pts=0;
   h2hChrono.forEach(g=>{
     if(g._draw) dr++;
     else if(g._winner===p1) p1w++;
     else p2w++;
-    p1pts += gamePoints(g, p1);
   });
+  h2hChronoIRL.forEach(g=>{ p1pts += gamePoints(g, p1); });
   const tot=h2hGames.length;
   const p1pct=tot?Math.round(p1w/tot*100):0;
   const p2pct=tot?Math.round(p2w/tot*100):0;
@@ -656,12 +808,12 @@ function renderH2H() {
       <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${dr}</div></div>
       <div class="stat"><div class="lbl">${p2} wins</div><div class="val" style="color:${pc(p2)}">${p2w}</div><div class="sub">${p2pct}%</div></div>
       <div class="stat"><div class="lbl">Total</div><div class="val">${tot}</div></div>
-      <div class="stat"><div class="lbl">Point Diff</div><div class="val" style="color:${ptsColor(p1pts)}">${fmtPts(p1pts)}</div><div class="sub">${p1} perspective</div></div>
+      <div class="stat"><div class="lbl">Point Diff<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(p1pts)}">${fmtPts(p1pts)}</div><div class="sub">${p1} perspective</div></div>
     </div>
 
-    <div class="sec">Cumulative point differential</div>
+    <div class="sec">Cumulative point differential <span class="irl-tag" style="font-size:9px">— IRL games only</span></div>
     <p style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:1rem">
-      Running total of points ${p1} has gained over ${p2} across their shared game history. Above zero = ${p1} ahead, below zero = ${p2} ahead.
+      Running total of points ${p1} has gained over ${p2} across their shared in-person game history (Chess.com games are not part of the points system and never appear here). Above zero = ${p1} ahead, below zero = ${p2} ahead.
     </p>
     <div class="cbox"><canvas id="c-h2h-pts"></canvas></div>
 
@@ -674,7 +826,7 @@ function renderH2H() {
     type:'line',
     data:{datasets:[{
       label:`${p1} vs ${p2} — pt diff`,
-      data:cumPtsDiff(p1,h2hChrono),
+      data:cumPtsDiff(p1,h2hChronoIRL),
       borderColor:pc(p1),
       backgroundColor:'transparent',
       tension:0.2,
@@ -707,7 +859,9 @@ function renderH2HTable(p1,p2) {
   const slice=h2hGames.slice((h2hPage-1)*h2hPer, h2hPage*h2hPer);
   const total=Math.ceil(h2hGames.length/h2hPer);
   const rows=slice.map(g=>{
-    const pts1=gamePoints(g,p1);
+    const isOnline = g.source!=='IRL';
+    const marginCell = isOnline ? 'Online' : (g._diff?Math.abs(g._diff):'—');
+    const ptsCell = isOnline ? 'Online' : fmtPts(gamePoints(g,p1));
     return `<tr>
     <td style="color:var(--muted)">${g['Game ID']}</td>
     <td>${g._d.toLocaleDateString()}</td>
@@ -716,8 +870,8 @@ function renderH2HTable(p1,p2) {
     <td style="color:${pc(g['Player 2'])}">${g['Player 2']}</td>
     <td style="color:var(--muted);font-size:10px">${g['Color 2']}</td>
     <td><span class="bdg ${g._draw?'bdg-d':g._winner===p1?'bdg-w':'bdg-l'}">${g._draw?'Draw':g._winner}</span></td>
-    <td style="text-align:right;color:${Math.abs(g._diff)>10?'var(--red)':'var(--muted)'}" title="${marginTooltip(g)}">${g._diff?Math.abs(g._diff):'—'}</td>
-    <td style="text-align:right;color:${ptsColor(pts1)}" title="Pts gained/lost by ${p1} this game">${fmtPts(pts1)}</td>
+    <td style="text-align:right;color:${isOnline?'var(--blue)':Math.abs(g._diff)>10?'var(--red)':'var(--muted)'}" title="${marginTooltip(g)}">${marginCell}</td>
+    <td style="text-align:right;color:${isOnline?'var(--blue)':ptsColor(gamePoints(g,p1))}" title="${isOnline?'Chess.com games are not part of the points system':'Pts gained/lost by '+p1+' this game'}">${ptsCell}</td>
     <td style="color:var(--muted);font-size:11px">${g['Notes']||''}</td>
   </tr>`;}).join('');
 
@@ -819,7 +973,7 @@ function renderCompare() {
   const end = endStr ? new Date(endStr) : null;
   if(end) end.setHours(23,59,59,999);
 
-  const filtered = G.filter(g=>{
+  const matchesFilters = g => {
     if(g['Player 1']!==p1 && g['Player 2']!==p1) return false;
     if(p2 && g['Player 1']!==p2 && g['Player 2']!==p2) return false;
     if(start && g._d < start) return false;
@@ -829,17 +983,21 @@ function renderCompare() {
       if((n===''?'No note':n)!==note) return false;
     }
     return true;
-  });
+  };
 
-  let w=0,l=0,d=0,pts=0;
+  const filtered = sourceFiltered(G).filter(matchesFilters);   // record/log/chart respect the source toggle
+  const filteredIRL = GIRL.filter(matchesFilters);              // points ignore the toggle — always IRL only
+
+  let w=0,l=0,d=0;
   filtered.forEach(g=>{
     if(g._draw) d++;
     else if(g._winner===p1) w++;
     else l++;
-    pts += gamePoints(g, p1);
   });
+  let pts=0;
+  filteredIRL.forEach(g=>{ pts += gamePoints(g, p1); });
   const t=w+l+d, pct=t?Math.round(w/t*100):0;
-  const avgPts=t?+(pts/t).toFixed(1):0;
+  const avgPts=filteredIRL.length?+(pts/filteredIRL.length).toFixed(1):0;
   const col=pc(p1);
 
   cmpPage=1;
@@ -852,8 +1010,8 @@ function renderCompare() {
       <div class="stat"><div class="lbl">Losses</div><div class="val" style="color:var(--red)">${l}</div></div>
       <div class="stat"><div class="lbl">Draws</div><div class="val" style="color:var(--accent)">${d}</div></div>
       <div class="stat"><div class="lbl">Games</div><div class="val">${t}</div></div>
-      <div class="stat"><div class="lbl">Total Pts</div><div class="val" style="color:${ptsColor(pts)}">${fmtPts(pts)}</div></div>
-      <div class="stat"><div class="lbl">Avg Pts</div><div class="val" style="color:${ptsColor(avgPts)}">${fmtPts(avgPts)}</div></div>
+      <div class="stat"><div class="lbl">Total Pts<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(pts)}">${fmtPts(pts)}</div></div>
+      <div class="stat"><div class="lbl">Avg Pts<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(avgPts)}">${fmtPts(avgPts)}</div></div>
     </div>
 
     <div class="sec">Win % by month</div>
@@ -889,15 +1047,17 @@ function renderCompareTable(p1) {
   const slice=cmpGames.slice((cmpPage-1)*cmpPer, cmpPage*cmpPer);
   const total=Math.ceil(cmpGames.length/cmpPer);
   const rows=slice.map(g=>{
-    const pts1=gamePoints(g,p1);
+    const isOnline = g.source!=='IRL';
+    const marginCell = isOnline ? 'Online' : (g._diff?Math.abs(g._diff):'—');
+    const ptsCell = isOnline ? 'Online' : fmtPts(gamePoints(g,p1));
     return `<tr>
     <td style="color:var(--muted)">${g['Game ID']}</td>
     <td>${g._d.toLocaleDateString()}</td>
     <td style="color:${pc(g['Player 1'])}">${g['Player 1']}</td>
     <td style="color:${pc(g['Player 2'])}">${g['Player 2']}</td>
     <td><span class="bdg ${g._draw?'bdg-d':'bdg-w'}" style="${g._draw?'':'background:'+pc(g._winner||'')+'18;color:'+pc(g._winner||'')}">${g._draw?'Draw':g._winner}</span></td>
-    <td style="text-align:right;color:${Math.abs(g._diff)>10?'var(--red)':'var(--muted)'}" title="${marginTooltip(g)}">${g._diff?Math.abs(g._diff):'—'}</td>
-    <td style="text-align:right;color:${ptsColor(pts1)}" title="Pts gained/lost by ${p1} this game">${fmtPts(pts1)}</td>
+    <td style="text-align:right;color:${isOnline?'var(--blue)':Math.abs(g._diff)>10?'var(--red)':'var(--muted)'}" title="${marginTooltip(g)}">${marginCell}</td>
+    <td style="text-align:right;color:${isOnline?'var(--blue)':ptsColor(gamePoints(g,p1))}" title="${isOnline?'Chess.com games are not part of the points system':'Pts gained/lost by '+p1+' this game'}">${ptsCell}</td>
     <td style="color:var(--muted);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${g['Notes']||''}</td>
   </tr>`;}).join('');
 
@@ -989,17 +1149,20 @@ function renderRunning() {
   const isPts = view==='points';
 
   document.getElementById('run-sec-title').textContent = isPts
-    ? 'Cumulative points — every game counts'
+    ? 'Cumulative points — IRL games only'
     : 'Cumulative win% — every game counts';
   document.getElementById('run-desc').textContent = isPts
-    ? 'Each player starts at 0. A win adds the recorded differential exactly as logged (it can be negative); a loss subtracts the winner’s differential. Draws and ungraded games add nothing.'
-    : 'Game 1 win = 100%. Game 2 loss = 50%. Game 3 win = 66%. Each dot is one game played.';
+    ? 'Each player starts at 0. A win adds the recorded differential exactly as logged (it can be negative); a loss subtracts the winner’s differential. Draws and ungraded games add nothing. Chess.com games are not part of the points system — they never move this line, never appear as markers, and are unaffected by the source toggle above.'
+    : 'Game 1 win = 100%. Game 2 loss = 50%. Game 3 win = 66%. Each dot is one game played. Respects the source toggle above.';
 
+  // Win% always respects the global source toggle; cumulative points is IRL-only,
+  // always — Chess.com games are filtered out of the dataset entirely (GIRL) so
+  // they cannot appear as data points, markers, or gaps on the line in any form.
   const ds=players.map(p=>({
     label:p,
     data: isPts
-      ? (mode==='date' ? cumPtsByDate(p,G) : cumPtsByGame(p,G))
-      : (mode==='date' ? cumPctByDate(p,G) : cumPct(p,G)),
+      ? (mode==='date' ? cumPtsByDate(p,GIRL) : cumPtsByGame(p,GIRL))
+      : (mode==='date' ? cumPctByDate(p,sourceFiltered(G)) : cumPct(p,sourceFiltered(G))),
     borderColor:pc(p),
     backgroundColor:'transparent',
     tension:0.25,
@@ -1070,7 +1233,7 @@ function buildGames() {
     </div>
     <div id="g-tbl"></div>
   `;
-  gFiltered=[...G].reverse();
+  gFiltered=[...sourceFiltered(G)].reverse();
   renderGames();
 }
 
@@ -1079,7 +1242,7 @@ function filterG() {
   const res=document.getElementById('gr').value;
   const col=document.getElementById('gc').value;
   const srch=document.getElementById('gs').value.toLowerCase();
-  gFiltered=[...G].reverse().filter(g=>{
+  gFiltered=[...sourceFiltered(G)].reverse().filter(g=>{
     if(pl){
       if(g['Player 1']!==pl&&g['Player 2']!==pl) return false;
       if(res==='win'&&(g._draw||g._winner!==pl)) return false;
@@ -1100,7 +1263,11 @@ function filterG() {
 function renderGames() {
   const slice=gFiltered.slice((gPage-1)*gPer,gPage*gPer);
   const total=Math.ceil(gFiltered.length/gPer);
-  const rows=slice.map(g=>`<tr>
+  const rows=slice.map(g=>{
+    const isOnline = g.source!=='IRL';
+    const diffCell = isOnline ? 'Online' : (g._diff || g._diff===0 ? (g._diff>0?'+':'')+g._diff : '—');
+    const diffColor = isOnline ? 'var(--blue)' : (Math.abs(g._diff)>15?'var(--red)':Math.abs(g._diff)>8?'var(--accent)':'var(--muted)');
+    return `<tr>
     <td style="color:var(--muted)">${g['Game ID']}</td>
     <td>${g._d.toLocaleDateString()}</td>
     <td style="color:${pc(g['Player 1'])}">${g['Player 1']}</td>
@@ -1108,13 +1275,14 @@ function renderGames() {
     <td style="color:${pc(g['Player 2'])}">${g['Player 2']}</td>
     <td style="color:var(--muted);font-size:10px">${g['Color 2']}</td>
     <td><span class="bdg ${g._draw?'bdg-d':'bdg-w'}" style="${g._draw?'':'background:'+pc(g._winner||'')+'18;color:'+pc(g._winner||'')}">${g._draw?'Draw':g._winner}</span></td>
-    <td style="text-align:right;color:${Math.abs(g._diff)>15?'var(--red)':Math.abs(g._diff)>8?'var(--accent)':'var(--muted)'}" title="${marginTooltip(g)}">${g._diff?Math.abs(g._diff):'—'}</td>
+    <td style="text-align:right;color:${diffColor}" title="${marginTooltip(g)}">${diffCell}</td>
+    <td><span class="bdg" style="background:${isOnline?'rgba(77,159,232,.12)':'rgba(232,212,77,.12)'};color:${isOnline?'var(--blue)':'var(--accent)'}">${g.source}</span></td>
     <td style="color:var(--muted);font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis">${g['Notes']||''}</td>
-  </tr>`).join('');
+  </tr>`;}).join('');
   const pgs=buildPages(gPage,total,'gPage','renderGames()');
   document.getElementById('g-tbl').innerHTML=`
     <div class="tbl-wrap">
-      <table><thead><tr><th>#</th><th>Date</th><th>Player 1</th><th>Color</th><th>Player 2</th><th>Color</th><th>Winner</th><th>Margin</th><th>Notes</th></tr></thead>
+      <table><thead><tr><th>#</th><th>Date</th><th>Player 1</th><th>Color</th><th>Player 2</th><th>Color</th><th>Winner</th><th>Differential</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${rows}</tbody></table>
     </div>
     <div class="pages"><span>${gFiltered.length} games</span>${pgs}</div>
@@ -1144,6 +1312,7 @@ async function startApp() {
     const games = parseData(text);
     if(!games.length) throw new Error('No games parsed');
     boot(games);
+    loadChessCom(games[0]._d); // appends in the background once ready — sheet renders first regardless
   } catch(e) {
     document.getElementById('app').innerHTML=`<div class="err">
       Could not load data from Google Sheets.<br><br>
@@ -1153,6 +1322,30 @@ async function startApp() {
     </div>`;
     document.getElementById('meta').textContent='Error loading data';
   }
+}
+
+// fetches Chess.com data in the background and appends it once ready, without
+// re-rendering the page from scratch — the Google Sheet view is already live
+async function loadChessCom(startDate) {
+  setCCStatus('<span style="color:var(--blue)">⏳ Loading Chess.com games…</span>');
+  try {
+    const onlineGames = await fetchChessCom(startDate);
+    mergeOnline(onlineGames);
+    setCCStatus(onlineGames.length
+      ? `<span style="color:var(--blue)">+${onlineGames.length} Chess.com game${onlineGames.length===1?'':'s'} loaded</span>`
+      : `<span style="color:var(--muted)">No Chess.com games found between the friend group</span>`);
+  } catch(e) {
+    setCCStatus(''); // Chess.com fetch failing must never break the dashboard — fail silently
+  }
+}
+
+function mergeOnline(onlineGames) {
+  if(!onlineGames.length) return;
+  G = G.concat(onlineGames).sort((a,b)=>a._d-b._d);
+  GIRL = G.filter(g=>g.source==='IRL');
+  PLAYERS = getPlayers(G);
+  refreshAll();
+  updateMeta();
 }
 
 // ─── PASSWORD GATE ────────────────────────────────────────────────────────────
