@@ -292,10 +292,11 @@ function parseData(text) {
   const games = [];
   for(let i=1;i<lines.length;i++){
     const v = parseCSVLine(lines[i]);
-    if(v.length<6) continue;
     const r={};
     hdr.forEach((h,idx)=>r[h]=(v[idx]||'').trim());
-    if(!r['Player 1']||!r['Player 2']||!r['Date']) continue;
+    // accept any row with the essential fields populated, regardless of how many
+    // optional trailing columns (Player Names, Player Pool, time data, etc.) it has
+    if(!r['Player 1']||!r['Player 2']||!r['Winner']||!r['Date']) continue;
     const d = new Date(r['Date']); if(isNaN(d)) continue;
     r._d = d;
     r._mo = d.toLocaleString('default',{month:'short',year:'2-digit'});
