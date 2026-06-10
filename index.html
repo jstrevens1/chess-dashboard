@@ -401,7 +401,12 @@ function chessGameToRecord(cg) {
     _d: d,
     _mo: d.toLocaleString('default',{month:'short',year:'2-digit'}),
     _moFull: d.toLocaleString('default',{month:'short',year:'numeric'}),
-    _draw: isDraw, _winner: winner, _loser: loser, _diff: 'Online', _timed: false
+    _draw: isDraw, _winner: winner, _loser: loser, _diff: 'Online', _timed: false,
+    p1_rating: typeof cg.white.rating==='number' ? cg.white.rating : null,
+    p2_rating: typeof cg.black.rating==='number' ? cg.black.rating : null,
+    p1_rating_change: null, p2_rating_change: null,
+    rating_diff: typeof cg.white.rating==='number' && typeof cg.black.rating==='number'
+      ? cg.white.rating - cg.black.rating : null
   };
 }
 
@@ -435,6 +440,24 @@ async function fetchChessCom(startDate) {
     if(rec && rec._d >= startDate) games.push(rec);
   });
   games.sort((a,b)=>a._d-b._d);
+  // sequential rating change per player: for each game, look at that player's NEXT friend-pool game
+  const plrSeq={};
+  games.forEach(g=>{
+    ['Player 1','Player 2'].forEach((key,si)=>{
+      const nm=g[key]; if(!plrSeq[nm]) plrSeq[nm]=[];
+      plrSeq[nm].push({g, seat: si===0?1:2});
+    });
+  });
+  Object.values(plrSeq).forEach(list=>{
+    list.forEach((entry,i)=>{
+      const {g,seat}=entry;
+      const cur  = seat===1 ? g.p1_rating : g.p2_rating;
+      const next = list[i+1];
+      const nxt  = next ? (next.seat===1 ? next.g.p1_rating : next.g.p2_rating) : null;
+      const chg  = (cur!=null && nxt!=null) ? nxt-cur : null;
+      if(seat===1) g.p1_rating_change=chg; else g.p2_rating_change=chg;
+    });
+  });
   return games;
 }
 
@@ -857,6 +880,31 @@ function renderPlayer(p) {
     </div>`;
   }).join('');
 
+  // ELO stat cards — use full G so peak/low reflect all-time, not a filtered subset
+  let eloStatCards = '';
+  if(hasCC(p)) {
+    const ed = playerEloData(p, G);
+    if(ed.length) {
+      const peak = ed.reduce((a,b)=>b.rating>a.rating?b:a);
+      const low  = ed.reduce((a,b)=>b.rating<a.rating?b:a);
+      const fmtSub = d=>`${d.date.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})} vs ${d.opp}`;
+      eloStatCards = `
+      <div class="stat"><div class="lbl">Peak ELO<span class="irl-tag">Chess.com</span></div><div class="val" style="color:var(--accent)">${peak.rating}</div><div class="sub">${fmtSub(peak)}</div></div>
+      <div class="stat"><div class="lbl">Low ELO<span class="irl-tag">Chess.com</span></div><div class="val" style="color:var(--red)">${low.rating}</div><div class="sub">${fmtSub(low)}</div></div>`;
+    }
+  }
+  const eloChartSection = hasCC(p) ? `
+    <div class="sec">Chess.com Rating Over Time</div>
+    <div class="cbox">
+      <div style="display:flex;gap:6px;margin-bottom:.75rem">
+        <div class="pill${window._playerEloMode==='game'?' on':''}" data-elo-pill="game"${window._playerEloMode==='game'?' style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)"':''} onclick="setPlayerEloMode('game')">By Game #</div>
+        <div class="pill${window._playerEloMode==='date'?' on':''}" data-elo-pill="date"${window._playerEloMode==='date'?' style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)"':''} onclick="setPlayerEloMode('date')">By Date</div>
+      </div>
+      <canvas id="c-p-elo"></canvas>
+      <p style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:.75rem">Rating reflects Chess.com ELO entering each game against the friend pool. Net change reflects difference to next pool game, not isolated game impact.</p>
+    </div>
+  ` : '';
+
   document.getElementById('player-body').innerHTML = `
     <div class="stat-grid">
       <div class="stat"><div class="lbl">Win %</div><div class="val" style="color:${col}">${s.pct}%</div></div>
@@ -869,6 +917,7 @@ function renderPlayer(p) {
       <div class="stat"><div class="lbl">Current Streak</div><div class="val" style="color:${strColor};font-size:1.3rem;padding-top:.2rem">${sr.cur} ${strLabel}${sr.cur!==1?'s':''}</div></div>
       ${beaten[0]?`<div class="stat"><div class="lbl">Most Beaten</div><div class="val" style="color:${pc(beaten[0][0])};font-size:1.2rem;padding-top:.25rem">${beaten[0][0]}</div><div class="sub">${beaten[0][1].w} wins</div></div>`:''}
       ${hardest[0]?`<div class="stat"><div class="lbl">Hardest Opp</div><div class="val" style="color:${pc(hardest[0][0])};font-size:1.2rem;padding-top:.25rem">${hardest[0][0]}</div><div class="sub">${hardest[0][1].l} losses</div></div>`:''}
+      ${eloStatCards}
     </div>
 
     <div class="sec">Win % — ${tsTitle}</div>
@@ -879,6 +928,7 @@ function renderPlayer(p) {
 
     <div class="sec">Record vs each opponent</div>
     <div class="h2h-grid">${cards}</div>
+    ${eloChartSection}
   `;
 
   // win % chart — one bar per game (Game # mode) or per period (aggregated modes);
@@ -893,6 +943,8 @@ function renderPlayer(p) {
       responsive:true,maintainAspectRatio:true
     }
   });
+
+  if(hasCC(p)) renderPlayerEloChart(p);
 
   // net points chart — IRL only, always, regardless of the source toggle, narrowed
   // by the same "Playing as" color filter as the rest of the Player tab. One bar
@@ -946,8 +998,120 @@ function playerPointsSeries(player, games, mode) {
   });
 }
 
+function renderPlayerEloChart(player) {
+  const el = document.getElementById('c-p-elo');
+  if(!el) return;
+  dc('p-elo');
+  const eloData = playerEloData(player, G);
+  if(eloData.length < 2) {
+    el.style.display='none';
+    if(!el.parentElement.querySelector('.elo-empty'))
+      el.parentElement.insertAdjacentHTML('beforeend','<p class="elo-empty" style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--muted);padding:.5rem 0">Not enough Chess.com data yet</p>');
+    return;
+  }
+  el.style.display='';
+  const col = pc(player);
+  const isDate = window._playerEloMode==='date';
+  const series = eloData.map(d=>({
+    x: isDate ? d.date.getTime() : d.gameNum,
+    y: d.rating, _e: d
+  }));
+  const ptColors = eloPointColors(eloData);
+  const ratings = eloData.map(d=>d.rating);
+  const minR = Math.min(...ratings)-20, maxR = Math.max(...ratings)+20;
+  const xScale = isDate
+    ? {type:'linear',grid:{color:gridColor},title:{display:true,text:'Date',color:'#6b6b7a',font:{size:10}},
+       ticks:{color:'#6b6b7a',maxTicksLimit:10,callback:v=>new Date(v).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})}}
+    : {type:'linear',...axisOpts('Game #'),ticks:{...axisOpts().ticks,stepSize:1,maxTicksLimit:20,autoSkip:true}};
+  dc('p-elo');
+  charts['p-elo']=new Chart(el,{
+    type:'line',
+    data:{datasets:[{
+      data:series,
+      borderColor:col, backgroundColor:'transparent',
+      pointBackgroundColor:ptColors, pointBorderColor:ptColors,
+      pointRadius:3, pointHoverRadius:6,
+      tension:0.3, borderWidth:2
+    }]},
+    options:{
+      parsing:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{
+          title:items=>{
+            const e=items[0]?.raw?._e;
+            return e ? `${e.date.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})} vs ${e.opp}` : '';
+          },
+          label:c=>{
+            const e=c.raw._e;
+            const res=e.result==='W'?'Win':e.result==='L'?'Loss':'Draw';
+            const chg=e.change!=null?(e.change>0?`+${e.change}`:String(e.change)):'(latest)';
+            return [`Rating: ${e.rating}`,`Result: ${res}`,`Net change to next: ${chg}`];
+          }
+        }}
+      },
+      scales:{
+        x:xScale,
+        y:{min:minR,max:maxR,...axisOpts('Rating')}
+      },
+      responsive:true,maintainAspectRatio:true
+    }
+  });
+}
+
+// ─── ELO HELPERS ──────────────────────────────────────────────────────────────
+const CC_PLAYERS = new Set(Object.keys(CHESS_USERNAMES)); // John, Josh, Connor, Mak, Russell
+const hasCC = p => CC_PLAYERS.has(p);
+
+// returns chronologically ordered array of ELO data entries for a player's
+// online friend-pool games drawn from `games` (caller decides scope)
+function playerEloData(player, games) {
+  const og = games.filter(g=>g.source==='Online'&&(g['Player 1']===player||g['Player 2']===player));
+  return og.map((g,i)=>{
+    const isP1 = g['Player 1']===player;
+    return {
+      rating: isP1 ? g.p1_rating : g.p2_rating,
+      change: isP1 ? g.p1_rating_change : g.p2_rating_change,
+      date:   g._d,
+      opp:    isP1 ? g['Player 2'] : g['Player 1'],
+      result: g._draw ? 'D' : g._winner===player ? 'W' : 'L',
+      gameNum: i+1,
+      _g: g
+    };
+  }).filter(d=>d.rating!=null);
+}
+
+// point color: compare this entry's rating to the previous entry in the sequence
+function eloPointColors(data) {
+  return data.map((d,i)=>{
+    if(i===0) return '#6b6b7a';
+    const delta = d.rating - data[i-1].rating;
+    return delta>0 ? '#4de8a8' : delta<0 ? '#e84d6f' : '#6b6b7a';
+  });
+}
+
+window._playerEloMode = 'game';
+function setPlayerEloMode(mode) {
+  window._playerEloMode = mode;
+  document.querySelectorAll('[data-elo-pill]').forEach(el=>{
+    const on = el.dataset.eloPill===mode;
+    el.classList.toggle('on', on);
+    el.style.background   = on ? 'var(--accent)' : '';
+    el.style.color        = on ? '#0d0d0f'        : '';
+    el.style.borderColor  = on ? 'var(--accent)'  : '';
+  });
+  const sel = document.getElementById('sel-player');
+  if(sel) renderPlayerEloChart(sel.value);
+}
+
 // ─── COMPARE BUILDER ──────────────────────────────────────────────────────────
 window._cbColorMode = {p1:'both', p2:'both'}; // 'both' | 'White' | 'Black' — per-player color filters
+window._cbShowRatingDiff = false; // optional "P1 − P2 rating gap" overlay on CB ELO chart
+
+function toggleCBRatingDiff(el) {
+  window._cbShowRatingDiff = !window._cbShowRatingDiff;
+  renderCompareBuilder();
+}
 
 function setCBColorMode(which, mode, el) {
   const key = 'p'+which;
@@ -1114,8 +1278,8 @@ function renderCompareBuilder() {
   const startStr = document.getElementById('cb-start').value;
   const endStr = document.getElementById('cb-end').value;
   const note = document.getElementById('cb-note').value;
-  const start = startStr ? new Date(startStr) : null;
-  const end = endStr ? new Date(endStr) : null;
+  const start = startStr ? new Date(startStr + 'T00:00:00') : null;
+  const end = endStr ? new Date(endStr + 'T00:00:00') : null;
   if(end) end.setHours(23,59,59,999);
 
   const matches = g => {
@@ -1147,6 +1311,44 @@ function renderCompareBuilder() {
   cbPage = 1;
   cbGames = filtered.slice().reverse();
 
+  // ELO section — only when source includes online games and at least one player has a CC account
+  const showEloSection = window._sourceMode!=='irl' && (hasCC(p1)||(p2&&hasCC(p2)));
+  let eloStatRow = '';
+  if(showEloSection) {
+    const p1ed = hasCC(p1) ? playerEloData(p1, filtered) : [];
+    const p2ed = (p2&&hasCC(p2)) ? playerEloData(p2, filtered) : [];
+    let eloCards = '';
+    const fmtES = d=>`${d.date.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'})} vs ${d.opp}`;
+    if(p1ed.length) {
+      const peak=p1ed.reduce((a,b)=>b.rating>a.rating?b:a);
+      const low =p1ed.reduce((a,b)=>b.rating<a.rating?b:a);
+      eloCards += `<div class="stat"><div class="lbl">${p1} Peak ELO</div><div class="val" style="color:${col}">${peak.rating}</div><div class="sub">${fmtES(peak)}</div></div>
+      <div class="stat"><div class="lbl">${p1} Low ELO</div><div class="val" style="color:var(--red)">${low.rating}</div><div class="sub">${fmtES(low)}</div></div>`;
+    }
+    if(p2&&p2ed.length) {
+      const col2=pc(p2);
+      const peak=p2ed.reduce((a,b)=>b.rating>a.rating?b:a);
+      const low =p2ed.reduce((a,b)=>b.rating<a.rating?b:a);
+      eloCards += `<div class="stat"><div class="lbl">${p2} Peak ELO</div><div class="val" style="color:${col2}">${peak.rating}</div><div class="sub">${fmtES(peak)}</div></div>
+      <div class="stat"><div class="lbl">${p2} Low ELO</div><div class="val" style="color:var(--red)">${low.rating}</div><div class="sub">${fmtES(low)}</div></div>`;
+    }
+    if(eloCards) {
+      eloStatRow = `<p style="font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);margin:.9rem 0 .4rem;max-width:760px;margin-left:auto;margin-right:auto">Chess.com ELO — friend pool games only</p>
+      <div class="stat-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));max-width:760px;margin-left:auto;margin-right:auto">${eloCards}</div>`;
+    }
+  }
+  const cbEloSection = showEloSection ? `
+    <div class="sec">Chess.com Rating at Time of Game${titleSuffix}</div>
+    <div class="cbox">
+      <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.75rem">
+        <span style="font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Rating gap overlay</span>
+        <div class="pill${window._cbShowRatingDiff?' on':''}"${window._cbShowRatingDiff?' style="background:var(--accent);color:#0d0d0f;border-color:var(--accent)"':''} onclick="toggleCBRatingDiff(this)">P1 − P2</div>
+      </div>
+      <canvas id="c-cb-elo"></canvas>
+      <p style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:.75rem">Chess.com ratings only. Net change reflects difference to next pool game against friend group.</p>
+    </div>
+  ` : '';
+
   document.getElementById('cb-body').innerHTML = `
     <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);max-width:760px;margin-left:auto;margin-right:auto">
       <div class="stat"><div class="lbl">${p1} Wins</div><div class="val" style="color:var(--green)">${s.w}</div></div>
@@ -1158,6 +1360,7 @@ function renderCompareBuilder() {
       <div class="stat"><div class="lbl">Avg Pts/Game<span class="irl-tag">IRL only</span></div><div class="val" style="color:${ptsColor(s.avgPts)}">${fmtPts(s.avgPts)}</div></div>
       <div class="stat"><div class="lbl">Current Streak</div><div class="val" style="color:${strColor};font-size:1.3rem;padding-top:.2rem">${sr.cur} ${strLabel}${sr.cur!==1?'s':''}</div></div>
     </div>
+    ${eloStatRow}
 
     ${filtered.length ? `
       <div class="sec">Streak Momentum — ${p1}${titleSuffix}</div>
@@ -1184,6 +1387,7 @@ function renderCompareBuilder() {
     ` : `
       <p style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);padding:1rem 0">No games match the current filters</p>
     `}
+    ${cbEloSection}
 
     <div class="sec">Game log</div>
     <div id="cb-tbl"></div>
@@ -1196,6 +1400,8 @@ function renderCompareBuilder() {
   } else {
     dc('cb-streak'); dc('cb-ptdiff'); dc('cb-cumpts');
   }
+  if(showEloSection) renderCBEloChart(filtered, p1, p2, xMode);
+  else dc('cb-elo');
 
   renderCompareBuilderTable(p1);
 }
@@ -1386,6 +1592,102 @@ function renderCBCumPtsChart(gamesIRL, p1, xMode) {
         x: tsXScale(),
         y:{...axisOpts('Cumulative Points'),grid:{color:ctx=>ctx.tick.value===0?'rgba(255,255,255,.3)':gridColor}}
       },
+      responsive:true,maintainAspectRatio:true,
+      interaction:{mode:'index',intersect:false}
+    }
+  });
+}
+
+function renderCBEloChart(filteredGames, p1, p2, xMode) {
+  const p1HasCC = hasCC(p1);
+  const p2HasCC = p2&&hasCC(p2);
+  const p1Data = p1HasCC ? playerEloData(p1, filteredGames) : [];
+  const p2Data = p2HasCC ? playerEloData(p2, filteredGames) : [];
+  const el = document.getElementById('c-cb-elo');
+  if(!el) return;
+  dc('cb-elo');
+  if(!p1Data.length&&!p2Data.length) return;
+
+  function buildSeries(eloData) {
+    if(xMode==='game') return eloData.map((d,i)=>({x:i+1,y:d.rating,_e:d}));
+    // period modes: bucket by period, keep last rating per bucket
+    const bkts={}, ord=[];
+    eloData.forEach(d=>{
+      const dt=d.date;
+      let t;
+      if(xMode==='daily')    t=new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()).getTime();
+      else if(xMode==='weekly')  t=new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()-dt.getDay()).getTime();
+      else if(xMode==='monthly') t=new Date(dt.getFullYear(),dt.getMonth(),1).getTime();
+      else                       t=new Date(dt.getFullYear(),0,1).getTime();
+      if(!bkts[t]) ord.push(t);
+      bkts[t]=d;
+    });
+    return ord.sort((a,b)=>a-b).map(t=>({x:t,y:bkts[t].rating,_e:bkts[t]}));
+  }
+
+  const datasets=[];
+  if(p1HasCC&&p1Data.length) {
+    datasets.push({label:p1,data:buildSeries(p1Data),borderColor:pc(p1),backgroundColor:'transparent',
+      pointBackgroundColor:eloPointColors(p1Data),pointBorderColor:eloPointColors(p1Data),
+      pointRadius:3,pointHoverRadius:6,tension:0.3,borderWidth:2});
+  }
+  if(p2HasCC&&p2Data.length) {
+    datasets.push({label:p2,data:buildSeries(p2Data),borderColor:pc(p2),backgroundColor:'transparent',
+      pointBackgroundColor:eloPointColors(p2Data),pointBorderColor:eloPointColors(p2Data),
+      pointRadius:3,pointHoverRadius:6,tension:0.3,borderWidth:2});
+  }
+
+  // optional P1−P2 gap overlay (game mode only, specific p2 required)
+  if(window._cbShowRatingDiff&&p2&&p1HasCC&&p2HasCC&&p1Data.length&&p2Data.length&&xMode==='game') {
+    const diffSeries=[];
+    p1Data.forEach((d1,i)=>{
+      const d2=p2Data.find(d=>d._g===d1._g);
+      if(d2&&d1.rating!=null&&d2.rating!=null)
+        diffSeries.push({x:i+1,y:d1.rating-d2.rating,_e:d1});
+    });
+    if(diffSeries.length) {
+      datasets.push({label:'Rating gap (P1 − P2)',data:diffSeries,
+        borderColor:'#888',backgroundColor:'transparent',
+        borderDash:[5,4],pointRadius:0,pointHoverRadius:3,
+        tension:0.3,borderWidth:1.5,yAxisID:'y2'});
+    }
+  }
+
+  const allRatings=[...p1Data,...p2Data].map(d=>d.rating).filter(r=>r!=null);
+  const minR=Math.min(...allRatings)-20, maxR=Math.max(...allRatings)+20;
+  const scales={x:tsXScale(),y:{min:minR,max:maxR,...axisOpts('Rating')}};
+  const gapDs=datasets.find(d=>d.yAxisID==='y2');
+  if(gapDs) {
+    const dv=gapDs.data.map(d=>d.y);
+    scales.y2={position:'right',...axisOpts('Rating Gap (P1-P2)'),
+      min:Math.min(...dv)-10,max:Math.max(...dv)+10,
+      grid:{drawOnChartArea:false},ticks:{color:'#6b6b7a',callback:v=>(v>0?'+':'')+v}};
+  }
+
+  charts['cb-elo']=new Chart(el,{
+    type:'line',data:{datasets},
+    options:{
+      parsing:false,
+      plugins:{
+        legend:{display:datasets.length>1,labels:{color:'#f0ede6',font:{family:'DM Mono',size:11},padding:14}},
+        tooltip:{mode:'index',intersect:false,callbacks:{
+          title:items=>{
+            if(!items.length) return '';
+            const e=items[0].raw._e;
+            return xMode==='game'
+              ? `Game ${items[0].parsed.x} — ${e.date.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`
+              : tsTooltipLabel(items[0].parsed.x);
+          },
+          label:c=>{
+            const e=c.raw._e;
+            if(c.dataset.yAxisID==='y2') return `Rating gap: ${c.parsed.y>0?'+':''}${c.parsed.y}`;
+            const res=e.result==='W'?'Win':e.result==='L'?'Loss':'Draw';
+            const chg=e.change!=null?(e.change>0?`+${e.change}`:String(e.change)):'n/a';
+            return `${c.dataset.label}: ${e.rating} (vs ${e.opp}, ${res}, next Δ ${chg})`;
+          }
+        }}
+      },
+      scales,
       responsive:true,maintainAspectRatio:true,
       interaction:{mode:'index',intersect:false}
     }
