@@ -182,6 +182,29 @@ tr:hover td{background:var(--s2)}
   60%{transform:translateX(-6px)}
   80%{transform:translateX(4px)}
 }
+
+/* WEIRD GAME TAB */
+.wg-wrap{display:flex;flex-direction:column;align-items:center;gap:2.5rem;padding-top:.5rem}
+.wg-card{background:var(--s1);border:1px solid var(--border);border-radius:12px;padding:2rem 2.5rem;width:100%;max-width:500px;text-align:center}
+.wg-title{font-family:'Bebas Neue',sans-serif;font-size:2.8rem;color:var(--accent);letter-spacing:.04em;line-height:1;margin-bottom:.25rem}
+.wg-sub{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:2rem;letter-spacing:.04em}
+.wg-btn-row{display:flex;align-items:center;justify-content:center;gap:.85rem;margin-bottom:.85rem}
+.wg-play-btn{background:none;border:none;cursor:pointer;font-size:80px;line-height:1;color:var(--accent);padding:0;display:flex;align-items:center;justify-content:center;font-family:'DM Sans',sans-serif}
+.wg-play-btn.playing{animation:wg-pulse 1.4s ease-in-out infinite}
+@keyframes wg-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.72;transform:scale(1.09)}}
+.wg-ctrl-btn{background:var(--s2);border:1px solid var(--border);color:var(--muted);font-size:20px;width:42px;height:42px;border-radius:50%;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;line-height:1}
+.wg-ctrl-btn.loop-on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.wg-stop-btn{background:var(--red);border:none;color:#fff;font-size:14px;width:42px;height:42px;border-radius:50%;cursor:pointer;display:none;align-items:center;justify-content:center}
+.wg-stop-btn.show{display:flex}
+.wg-time{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);margin-bottom:.85rem;letter-spacing:.05em}
+.wg-progress{width:100%;height:5px;background:var(--border2);border-radius:3px;margin-bottom:1.75rem;cursor:pointer;position:relative}
+.wg-progress-fill{height:100%;border-radius:3px;background:var(--accent);width:0%;pointer-events:none;transition:width .1s linear}
+.wg-speed-row{display:flex;align-items:center;gap:.85rem;justify-content:center;flex-wrap:wrap}
+.wg-speed-lbl{font-family:'DM Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.wg-slider{-webkit-appearance:none;appearance:none;width:180px;height:4px;background:var(--border2);border-radius:2px;outline:none;cursor:pointer}
+.wg-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer}
+.wg-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
+.wg-speed-pill{background:var(--accent);color:var(--bg);font-family:'DM Mono',monospace;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:500;min-width:42px;text-align:center}
 </style>
 </head>
 <body>
@@ -683,6 +706,7 @@ function boot(games) {
       <button class="tab" onclick="sw('cmpbuilder',this)">Compare Builder</button>
       <button class="tab" onclick="sw('running',this)">Running Win%</button>
       <button class="tab" onclick="sw('games',this)">All Games</button>
+      <button class="tab" onclick="sw('weirdgame',this)">Weird Game</button>
       <button class="tab" onclick="sw('changelog',this)">Changelog</button>
     </nav>
     <div id="pane-overview"    class="pane on"></div>
@@ -690,6 +714,7 @@ function boot(games) {
     <div id="pane-cmpbuilder"  class="pane"></div>
     <div id="pane-running"     class="pane"></div>
     <div id="pane-games"       class="pane"></div>
+    <div id="pane-weirdgame"   class="pane"></div>
     <div id="pane-changelog"   class="pane"></div>
   `;
   buildOverview();
@@ -697,6 +722,7 @@ function boot(games) {
   buildCompareBuilder();
   buildRunning();
   buildGames();
+  buildWeirdGame();
 }
 
 function sw(id, btn) {
@@ -1962,6 +1988,149 @@ function buildPages(cur, total, varName, fn) {
     }
   }
   return html;
+}
+
+// ─── WEIRD GAME TAB ───────────────────────────────────────────────────────────
+const _wgAudio = {};
+const _wgCtx   = {};
+const _wgState = {};
+
+function buildWeirdGame() {
+  const el = document.getElementById('pane-weirdgame');
+  if(!el) return;
+  el.innerHTML = `<div class="wg-wrap">
+    ${_wgCardHTML(1,'Weird Game','the official soundtrack of chaos')}
+    ${_wgCardHTML(2,'Neigh Neigh','the password. the legend. the horse.')}
+  </div>`;
+  if(!_wgAudio[1]) _wgInitPlayer(1,'assets/WEIRD GAME.mp3','assets/WEIRD GAME.aif');
+  if(!_wgAudio[2]) _wgInitPlayer(2,'assets/NEIGHNEIGH.mp3','assets/NEIGHNEIGH.aif');
+}
+
+function _wgCardHTML(idx, title, sub) {
+  return `<div class="wg-card">
+    <div class="wg-title">${title}</div>
+    <div class="wg-sub">${sub}</div>
+    <div class="wg-btn-row">
+      <button class="wg-play-btn" id="wgp${idx}-play" onclick="wgToggle(${idx})" title="Play / Pause">&#x265E;</button>
+      <button class="wg-ctrl-btn" id="wgp${idx}-loop" onclick="wgToggleLoop(${idx})" title="Loop">&#x21BB;</button>
+      <button class="wg-stop-btn" id="wgp${idx}-stop" onclick="wgStop(${idx})" title="Stop">&#x25A0;</button>
+    </div>
+    <div class="wg-time" id="wgp${idx}-time">0:00 / 0:00</div>
+    <div class="wg-progress" id="wgp${idx}-prog" onclick="wgSeek(${idx},event)">
+      <div class="wg-progress-fill" id="wgp${idx}-fill"></div>
+    </div>
+    <div class="wg-speed-row">
+      <span class="wg-speed-lbl">Speed</span>
+      <input type="range" class="wg-slider" id="wgp${idx}-spd" min="0.25" max="2" step="0.25" value="1" oninput="wgSpeed(${idx},this)">
+      <span class="wg-speed-pill" id="wgp${idx}-pill">1x</span>
+    </div>
+  </div>`;
+}
+
+function _wgInitPlayer(idx, src, fallback) {
+  const audio = new Audio(src);
+  audio.preload = 'metadata';
+  audio.onerror = () => { if(!audio._usedFallback){ audio._usedFallback=true; audio.src=fallback; } };
+
+  // disable pitch preservation so pitch rises/falls with playback rate
+  audio.preservesPitch = false;
+  audio.mozPreservesPitch = false;
+  audio.webkitPreservesPitch = false;
+
+  const ctx = new (window.AudioContext||window.webkitAudioContext)();
+  const node = ctx.createMediaElementSource(audio);
+  node.connect(ctx.destination);
+
+  _wgAudio[idx] = audio;
+  _wgCtx[idx]   = ctx;
+  _wgState[idx]  = { looping: false };
+
+  audio.addEventListener('timeupdate',      () => _wgUpdateUI(idx));
+  audio.addEventListener('loadedmetadata',  () => _wgUpdateUI(idx));
+  audio.addEventListener('ended', () => {
+    if(_wgState[idx].looping){
+      audio.currentTime = 0;
+      audio.play().catch(()=>{});
+    } else {
+      _wgSetPlaying(idx, false);
+    }
+  });
+}
+
+function wgToggle(idx) {
+  const audio = _wgAudio[idx];
+  if(!audio) return;
+  if(_wgCtx[idx].state==='suspended') _wgCtx[idx].resume();
+  if(audio.paused){
+    audio.play().catch(()=>{});
+    _wgSetPlaying(idx, true);
+  } else {
+    audio.pause();
+    _wgSetPlaying(idx, false);
+  }
+}
+
+function wgToggleLoop(idx) {
+  const st = _wgState[idx];
+  if(!st) return;
+  st.looping = !st.looping;
+  if(_wgCtx[idx] && _wgCtx[idx].state==='suspended') _wgCtx[idx].resume();
+  const lb = document.getElementById('wgp'+idx+'-loop');
+  const sb = document.getElementById('wgp'+idx+'-stop');
+  if(lb) lb.classList.toggle('loop-on', st.looping);
+  if(sb) sb.classList.toggle('show', st.looping);
+}
+
+function wgStop(idx) {
+  const audio = _wgAudio[idx];
+  if(!audio) return;
+  audio.pause();
+  audio.currentTime = 0;
+  _wgState[idx].looping = false;
+  const lb = document.getElementById('wgp'+idx+'-loop');
+  const sb = document.getElementById('wgp'+idx+'-stop');
+  if(lb) lb.classList.remove('loop-on');
+  if(sb) sb.classList.remove('show');
+  _wgSetPlaying(idx, false);
+  _wgUpdateUI(idx);
+}
+
+function wgSpeed(idx, input) {
+  const speed = parseFloat(input.value);
+  if(_wgAudio[idx]) _wgAudio[idx].playbackRate = speed;
+  const pill = document.getElementById('wgp'+idx+'-pill');
+  if(pill) pill.textContent = parseFloat(speed.toFixed(2)).toString()+'x';
+}
+
+function wgSeek(idx, e) {
+  const audio = _wgAudio[idx];
+  if(!audio || !audio.duration) return;
+  if(_wgCtx[idx] && _wgCtx[idx].state==='suspended') _wgCtx[idx].resume();
+  const bar = document.getElementById('wgp'+idx+'-prog');
+  const rect = bar.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  audio.currentTime = frac * audio.duration;
+}
+
+function _wgSetPlaying(idx, playing) {
+  const btn = document.getElementById('wgp'+idx+'-play');
+  if(btn) btn.classList.toggle('playing', playing);
+}
+
+function _wgUpdateUI(idx) {
+  const audio = _wgAudio[idx];
+  if(!audio) return;
+  const cur = audio.currentTime, dur = audio.duration||0;
+  const fill = document.getElementById('wgp'+idx+'-fill');
+  if(fill) fill.style.width = (dur ? (cur/dur*100) : 0)+'%';
+  const tEl = document.getElementById('wgp'+idx+'-time');
+  if(tEl) tEl.textContent = _wgFmt(cur)+' / '+_wgFmt(dur);
+}
+
+function _wgFmt(s) {
+  if(!s||isNaN(s)) return '0:00';
+  const m = Math.floor(s/60), sec = Math.floor(s%60);
+  return m+':'+(sec<10?'0':'')+sec;
 }
 
 // ─── CHANGELOG ────────────────────────────────────────────────────────────────
