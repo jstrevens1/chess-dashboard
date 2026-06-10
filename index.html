@@ -147,8 +147,12 @@ tr:hover td{background:var(--s2)}
 /* STREAK */
 .streak-badge{display:inline-flex;align-items:center;gap:6px;background:var(--s2);border:1px solid var(--border);border-radius:20px;padding:3px 12px;font-family:'DM Mono',monospace;font-size:11px}
 
+.am-badge{display:inline-flex;align-items:center;gap:6px;background:linear-gradient(135deg,#fc3c44,#ff2d55);border-radius:20px;padding:0 13px;height:32px;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:500;color:#fff;text-decoration:none;white-space:nowrap;transition:filter .15s,transform .15s;align-self:center}
+.am-badge:hover{filter:brightness(1.12);transform:scale(1.02)}
+
 @media(max-width:600px){
   .hdr,.pane,.tabs{padding-left:1rem;padding-right:1rem}
+  .am-badge{align-self:flex-start}
   .lb-hdr,.lb-row{grid-template-columns:36px 1fr 56px 56px 70px}
   .lb-hdr>*:nth-child(4),.lb-row>*:nth-child(4),
   .lb-hdr>*:nth-child(5),.lb-row>*:nth-child(5),
@@ -199,6 +203,12 @@ tr:hover td{background:var(--s2)}
     <div class="hdr-title">Chess <span>Night</span></div>
   </div>
   <div class="hdr-meta" id="meta">Loading...</div>
+  <a class="am-badge" href="https://music.apple.com/us/playlist/chess-q2-2026-horses-on-horses/pl.u-RRbVV1DI3YYj92V" target="_blank" rel="noopener">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M10.5 1.5v7.25a2 2 0 1 1-1.5-1.936V3.8L5 4.75V10a2 2 0 1 1-1.5-1.936V2.5a.5.5 0 0 1 .382-.486l6-1.5A.5.5 0 0 1 10.5 1z" fill="white"/>
+    </svg>
+    Chess Night Playlist
+  </a>
 </div>
 
 <div id="app">
